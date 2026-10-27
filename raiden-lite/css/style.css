@@ -1,0 +1,42 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #05070c;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(120% 80% at 50% 0%, #0d1622 0%, #05070c 60%);
+}
+
+#game {
+  display: block;
+  touch-action: none;
+  background: #05070c;
+  box-shadow: 0 0 48px rgba(70, 160, 220, .16), 0 0 2px rgba(140, 220, 255, .35);
+  border-radius: 6px;
+}
+
+#boot {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #4d7f99;
+  font-size: 13px;
+  letter-spacing: .3em;
+  pointer-events: none;
+  transition: opacity .3s;
+}
+
+#boot.hide { opacity: 0; }
