@@ -57,8 +57,11 @@ const Assets = {
       g.fill();
       return c;
     };
-    this.bulletSprites.player = make(18, 34, '#ffffff', 'rgba(120,230,255,0.85)');
-    this.bulletSprites.spread = make(18, 26, '#f4ffe0', 'rgba(200,255,110,0.85)');
+    // 火神炮用冷青、散射炮用暖黄：两者的弹道形状本来就接近（都是直射），
+    // 只靠光晕深浅区分在深色背景上几乎看不出，必须把冷暖彻底拉开。
+    // 顺带把体型也分开：火神炮细长（点射感），散射炮短粗（散弹团）。
+    this.bulletSprites.player = make(16, 36, '#e8fbff', 'rgba(40,200,255,0.95)');
+    this.bulletSprites.spread = make(22, 24, '#fffbe0', 'rgba(255,205,60,0.95)');
     this.bulletSprites.laser = make(14, 64, '#ffffff', 'rgba(255,105,160,0.90)');
     this.bulletSprites.missile = make(16, 26, '#f2fff4', 'rgba(130,255,160,0.90)');
     this.bulletSprites.plasma = make(30, 30, '#f6ecff', 'rgba(190,130,255,0.95)');

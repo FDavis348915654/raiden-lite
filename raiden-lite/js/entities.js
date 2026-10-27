@@ -283,6 +283,7 @@ class Player {
     if (!this.orbits) this.orbits = [];
     if (!this.weapons) this.weapons = [0];
     this.slotT = this.weapons.map(() => 0);   // 换关清零冷却
+    this.shotQ = [];                          // 错峰队列也清空，免得上一关的子弹跨关冒出
     for (const o of this.options) o.slotT = [0.12, 0.26];
   }
 
@@ -385,6 +386,7 @@ class Player {
       }
     }
 
+    this._flushShots(dt, game);   // 错峰队列：火神炮的后续子弹在这一帧出膛
     this._updateOptions(dt, game);
     this._updateOrbits(dt);
   }
@@ -466,6 +468,32 @@ class Player {
     this.fireFrom(game, this.x + off, this.y - 34, SLOT_DMG[s2] || 1, null, idx, s2 > 0);
   }
 
+  /** 错峰发射：把一轮里的后续子弹排进队列，到点才真正出膛。
+   *  mul 必须在入队时捕获 —— fireFrom 结束会把 game._shotMul 复位成 1，
+   *  等到出膛时再读就变成"主机伤害"了，僚机的 0.55/0.40 折扣会丢。 */
+  _queueShot(game, x, y, vx, vy, dmg, opt, delay) {
+    if (!this.shotQ) this.shotQ = [];
+    this.shotQ.push({
+      t: delay, x: x, y: y, vx: vx, vy: vy, dmg: dmg, opt: opt,
+      mul: game._shotMul || 1
+    });
+  }
+
+  /** 每帧推进错峰队列。暂停或阵亡时 update 不跑，队列自然停住，不会漏出子弹 */
+  _flushShots(dt, game) {
+    if (!this.shotQ || !this.shotQ.length) return;
+    for (let i = 0; i < this.shotQ.length;) {
+      const s = this.shotQ[i];
+      s.t -= dt;
+      if (s.t > 0) { i++; continue; }
+      const prev = game._shotMul;
+      game._shotMul = s.mul;
+      game.spawnPlayerBullet(s.x, s.y, s.vx, s.vy, s.dmg, s.opt);
+      game._shotMul = prev;
+      this.shotQ.splice(i, 1);   // 不 i++：splice 后同位置是下一颗
+    }
+  }
+
   /** 从任意位置开火：僚机复用同一套弹道
    *  mul 缩放伤害（僚机 0.55），pow 覆盖火力等级（僚机封顶 Lv2） */
   fireFrom(game, bx, by, mul, pow, wIdx, quiet) {
@@ -475,26 +503,40 @@ class Player {
     game._shotMul = self;
 
     switch (WEAPONS[wi].id) {
-      case 'vulcan':
-        if (p <= 1) {
-          game.spawnPlayerBullet(bx, by, 0, -980, 2, { kind: 'player' });
-        } else if (p === 2) {
-          game.spawnPlayerBullet(bx - 11, by, 0, -980, 2, { kind: 'player' });
-          game.spawnPlayerBullet(bx + 11, by, 0, -980, 2, { kind: 'player' });
-        } else {
-          game.spawnPlayerBullet(bx, by - 4, 0, -1020, 3, { kind: 'player' });
-          game.spawnPlayerBullet(bx - 15, by + 8, -120, -980, 2, { kind: 'player' });
-          game.spawnPlayerBullet(bx + 15, by + 8, 120, -980, 2, { kind: 'player' });
+      /* 火神炮：一轮多颗，但**错峰**出膛。
+       * 同一帧全吐出来的话，三发会在屏幕上糊成一条粗线，和散射炮的齐射没区别；
+       * 按 0.042 秒一颗逐次发射，看起来是连珠，也才立住"持续压制"这个定位。
+       * 第一颗仍然立即出膛，保证按键/触屏的响应手感。 */
+      case 'vulcan': {
+        const gap = this.boostT > 0 ? 0.028 : 0.042;   // 全弹发射的射速强化期，连珠更密
+        const shots = p <= 1 ? [[0, 0, 0, -980, 2]]
+          : p === 2 ? [[-11, 0, 0, -980, 2], [11, 0, 0, -980, 2]]
+            : [[0, -4, 0, -1020, 3], [-15, 8, -120, -980, 2], [15, 8, 120, -980, 2]];
+        for (let i = 0; i < shots.length; i++) {
+          const s = shots[i];
+          if (i === 0) {
+            game.spawnPlayerBullet(bx + s[0], by + s[1], s[2], s[3], s[4], { kind: 'player' });
+          } else {
+            this._queueShot(game, bx + s[0], by + s[1], s[2], s[3], s[4],
+              { kind: 'player' }, i * gap);
+          }
         }
         break;
+      }
 
+      /* 散射炮：一发齐射，扇面同时铺开，但射程只有 0.58 屏高。
+       * 速度恒定 780，所以把 life 直接算成 路径长度/速度 ——
+       * 这样扇形里每一发的路径长度一致，远端边界会连成一条干净的弧。
+       * 单发 2.6（火神炮 2）：射程砍短之后命中窗口变少，靠单发更痛来补偿，
+       * 否则多档火力下散弹会彻底被火神炮比下去。 */
       case 'spread': {
         const n = p === 1 ? 3 : p === 2 ? 5 : 7;
         const total = 0.62;
+        const life = SPREAD_RANGE / 780;
         for (let i = 0; i < n; i++) {
           const a = -Math.PI / 2 - total / 2 + (i * total) / (n - 1);
-          game.spawnPlayerBullet(bx, by, Math.cos(a) * 780, Math.sin(a) * 780, 1.5,
-            { kind: 'spread', r: 7 });
+          game.spawnPlayerBullet(bx, by, Math.cos(a) * 780, Math.sin(a) * 780, 2.6,
+            { kind: 'spread', r: 7, life: life });
         }
         break;
       }
@@ -675,6 +717,7 @@ class Player {
     this.canFire = true;
     this.boostT = 0;
     this.fireT = 0.25;
+    this.shotQ = [];              // 阵亡前没发完的连珠子弹不要带进新命
     this.x = VIEW.w / 2;
     this.y = PLAY_BOTTOM - 80;
     this.t = 0;
