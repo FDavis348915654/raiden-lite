@@ -19,7 +19,9 @@
 | `raiden-lite/assets/` | 程序化生成的图集与 9 张关卡背景 |
 | `raiden-lite/tools/` | 资源生成、BOSS 判定自动计算、平衡模拟、冒烟测试 |
 | `小米手环10-雷电Lite开发方案.md` | 移植到小米手环 10（Vela 快应用）的方案文档 |
+| `README.md` | 本文件 |
 | `LICENSE` | MIT |
+| `.gitignore` | 版本控制排除规则（详见下方「协作流程」） |
 
 ## 快速开始
 
@@ -74,6 +76,36 @@ python3 tools/smoke.py           # Playwright 冒烟：3 关 × 2 渠道，截�
 
 1. `js/config.js` 的 `VERSION`
 2. `index.html` 里 7 处 `?v=`
+
+### 协作流程
+
+这个目录同时是云电脑上的工作副本，**动手前先同步远端**。仓库已配置 `pull.rebase=true` 与 `rebase.autoStash=true`，所以有未提交改动时也能直接拉：
+
+```bash
+git pull --rebase        # 或简写 git sync（已设别名）
+```
+
+日常顺序：
+
+1. `git pull --rebase` 拉到最新
+2. 改 `raiden-lite/` 下的代码，同步版本号
+3. `python3 tools/smoke.py` 冒烟
+4. 需要发布时打包 `raiden-lite-<版本>.zip` 并部署线上
+5. 需要备份时 `git add -A && git commit -m "..." && git push`
+
+### 版本控制约定
+
+`.gitignore` 只排除“能重新生成或与运行无关”的东西，工程本身（含贴图、文档）全部入库：
+
+| 排除项 | 原因 |
+|---|---|
+| `*.zip` / `*.tar.gz` / `*.7z` | 打包产物与备份快照，可由 `raiden-lite/` 重新打出 |
+| `__pycache__/`、`*.py[cod]`、`.pytest_cache/`、`venv/` 等 | Python 运行缓存与虚拟环境 |
+| `.codebuddy/`、`.cloudstudio` | 云开发平台目录 |
+| `*.png.bak`、`*.tmp`、`*.log` | 素材备份与临时文件 |
+| `.vscode/`、`.idea/`、`.DS_Store` | 编辑器与系统文件 |
+
+`assets/_contact_*.png`（约 895K，`tools/gen_assets.py` 输出的验收拼贴图）**保留在仓库里**：它们已经在历史中，忽略只会造成“本地看不见、远端还在”的错觉。
 
 ## 版本
 

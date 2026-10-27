@@ -10,6 +10,15 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
 
 # 素材备份与临时文件
 *.png.bak
