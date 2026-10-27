@@ -1,0 +1,23 @@
+# 打包产物 / 备份压缩包：不进仓库（二进制、体积大，且可由工程重新打出）
+*.zip
+*.tar.gz
+*.7z
+
+# 平台目录
+.codebuddy/
+.cloudstudio
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 素材备份与临时文件
+*.png.bak
+*.tmp
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
