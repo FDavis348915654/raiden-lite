@@ -8,10 +8,15 @@ const BOMB_BTN = { x: VIEW.w - 34, y: VIEW.h - 28, r: 22 };
 const LASER_BTN = { x: VIEW.w - 92, y: VIEW.h - 28, r: 22 };
 // 声音开关：放在两个保险按钮上方，竖着排，避免和手指操作区抢位置
 const SOUND_BTN = { x: VIEW.w - 34, y: VIEW.h - 78, r: 18 };
+// 通关页出现后锁定输入的秒数：最后一击常常是连点，不锁会直接跳过结算和致谢
+const WIN_INPUT_LOCK = 2.0;
 
 const input = {
   left: false, right: false, up: false, down: false,
-  px: VIEW.w / 2, py: VIEW.h * 0.7, pointerActive: false
+  px: VIEW.w / 2, py: VIEW.h * 0.7, pointerActive: false,
+  // 控制权归属：多指同按时只有这一根手指能拖动飞机。
+  // 不记 id 的话，按保险的那根手指一抬起就会把拖动的状态一起清掉，表现为"飞机卡住，要重新触屏"
+  pointerId: -1
 };
 
 class Game {
@@ -77,6 +82,13 @@ class Game {
     this.summonT = 0;
     this.warnings = [];       // 底部来敌的警示标记
     this._bombing = false;
+    // 飞行中的高爆弹用数组：冷却基本不允许叠出第二颗，但"上一颗因为又按了一下就凭空消失"
+    // 是最不能接受的失败模式，所以结构上就不给顶掉的机会
+    this.bombDrops = [];
+    this.bombCdT = 0;         // 普通保险冷却剩余（秒）
+    this.laserCdT = 0;        // 激光保险冷却剩余（秒）
+    this.bombFx = null;       // 爆炸冲击环（0.5 秒后自动清空）
+    this.winT = 0;            // 通关页已停留时间（用于锁输入 + 提示渐显）
     // 声音总开关：持久化在 localStorage，进游戏前就生效（所以要在 SFX.init 之前读）
     this.soundOn = true;
     try {
@@ -88,6 +100,7 @@ class Game {
     this.demo = /[?&]auto=1/.test(location.search);
     this.debugBossFlag = /[?&]boss=1/.test(location.search);
     this.showHitbox = /[?&]hitbox=1/.test(location.search);   // 碰撞盒可视化
+    this.infiniteBombs = /[?&]bombs=inf/.test(location.search);   // 无限保险（调试）
     this.demoT = 0;
 
     /* 调试面板（DEBUG=false 时完全不创建） */
@@ -153,12 +166,13 @@ class Game {
     const P = DEV_PANEL;
     // 顺序刻意按功能分组：开关类一行、关卡类一行、道具/跳转一行
     const defs = [
-      { id: 'god',    label: '无敌' },
-      { id: 'hitbox', label: '碰撞盒' },
-      { id: 'prev',   label: '上一关' },
-      { id: 'next',   label: '下一关' },
-      { id: 'supply', label: '补给' },
-      { id: 'boss',   label: '跳Boss' }
+      { id: 'god',     label: '无敌' },
+      { id: 'infbomb', label: '无限保险' },
+      { id: 'hitbox',  label: '碰撞盒' },
+      { id: 'supply',  label: '补给' },
+      { id: 'prev',    label: '上一关' },
+      { id: 'next',    label: '下一关' },
+      { id: 'boss',    label: '跳Boss' }
     ];
     const perRow = 2;
     const rows = Math.ceil(defs.length / perRow);
@@ -216,6 +230,10 @@ class Game {
       case 'hitbox':
         this.showHitbox = !this.showHitbox;
         this._devToast(this.showHitbox ? '碰撞盒 ON' : '碰撞盒 OFF');
+        break;
+      case 'infbomb':
+        this.infiniteBombs = !this.infiniteBombs;
+        this._devToast(this.infiniteBombs ? '无限保险 ON（两种保险都不消耗）' : '无限保险 OFF');
         break;
       case 'next':
         this._devLevel(1);
@@ -314,8 +332,9 @@ class Game {
         return;
       }
 
-      // 右下角保险按钮（清屏 / 激光两种）
-      if (this.state === 'play' || this.state === 'boss') {
+      // 右下角保险按钮（清屏 / 激光两种）。状态条件直接复用 _canUseBomb，
+      // 免得这里和 _pressBomb 各写一份、将来又漏掉某个状态（BOSS 预警就是这么漏的）
+      if (this._canUseBomb()) {
         if (dist2(p.x, p.y, BOMB_BTN.x, BOMB_BTN.y) < 34 * 34) {
           this._pressBomb();
           return;
@@ -334,6 +353,7 @@ class Game {
       }
 
       input.pointerActive = true;
+      input.pointerId = e.pointerId;
       input.px = p.x;
       input.py = p.y;
       if (this.state === 'title' || this.state === 'win') {
@@ -342,11 +362,18 @@ class Game {
     };
     const onMove = e => {
       if (!input.pointerActive) return;
+      // 只认掌握控制权的那根手指：按保险的指头在屏幕上滑动不该把飞机拽走
+      if (e.pointerId !== input.pointerId) return;
       const p = this._toLocal(e);
       input.px = p.x;
       input.py = p.y;
     };
-    const onUp = () => { input.pointerActive = false; };
+    // 只有控制权的那根手指抬起才算松开；按保险的手指抬起不能影响拖动
+    const onUp = e => {
+      if (e.pointerId !== input.pointerId) return;
+      input.pointerActive = false;
+      input.pointerId = -1;
+    };
 
     this.cv.addEventListener('pointerdown', onDown);
     window.addEventListener('pointermove', onMove);
@@ -403,16 +430,22 @@ class Game {
   }
 
   _canUseBomb() {
-    return (this.state === 'play' || this.state === 'boss') && !this.paused && this.player.alive;
+    // 预警期（`warn`）玩家还能移动、开火，保险也必须能用：
+    // 那是"BOSS 快来了"的过场提示，不是暂停，锁掉保险只会让玩家白按
+    return (this.state === 'play' || this.state === 'boss' || this.state === 'warn') &&
+      !this.paused && this.player.alive;
   }
 
   _pressBomb() {
     if (!this._canUseBomb()) return;
+    // 冷却中不消耗保险、也不刷提示：按钮上有进度环，连点不该再听到/看到一堆反馈
+    if (this.bombCdT > 0) return;
     if (!this.player.useBomb(this)) this._devToast('清屏保险已用完');
   }
 
   _pressLaser() {
     if (!this._canUseBomb()) return;
+    if (this.laserCdT > 0) return;
     if (this.player.useLaser(this)) return;
     // 分清"没货"和"已经在打"：后者不是玩家的错，提示也不该一样
     if (this.laserBeam && this.laserBeam.state > 0) this._devToast('激光正在发射');
@@ -426,6 +459,9 @@ class Game {
 
   /* -------------------------------------------------- 流程 */
   beginRun() {
+    // 通关页刚出来的 2 秒内不接受重开：最后一击往往是连点，
+    // 直接跳过去玩家根本看不清结算和致谢
+    if (this.state === 'win' && this.winT < WIN_INPUT_LOCK) return;
     this.score = 0;
     this.continues = CONTINUE.max;
     this.contT = 0;
@@ -523,6 +559,10 @@ class Game {
     this.summonT = 0;
     this.warnings = [];       // 底部来敌的警示标记
     this._bombing = false;
+    this.bombDrops.length = 0;     // 换关清空飞行中的炸弹
+    this.bombCdT = 0;
+    this.laserCdT = 0;
+    this.bombFx = null;
     this.bullets.forEach(b => { b.active = false; });
     this.enemies.forEach(e => { e.active = false; });
     this.pickups.forEach(p => { p.active = false; });
@@ -565,6 +605,8 @@ class Game {
     for (const b of this.bullets) {
       if (b.active && b.friendly) b.active = false;
     }
+    // 在飞的高爆弹同理：死亡状态下不再推进，留着就会是一颗定格的炸弹挂在结算页后面
+    this.bombDrops.length = 0;
 
     // 三层爆炸，制造"机体正在解体"的过程感
     this.explode(this.player.x, this.player.y, 2.4, '#8fe8ff', 42);
@@ -607,6 +649,11 @@ class Game {
 
     this.player.revive();
     input.pointerActive = false;
+    input.pointerId = -1;
+    // 复活给干净的一套状态：别让上一命的冷却/在飞的炸弹带到新一条命里
+    this.bombDrops.length = 0;
+    this.bombCdT = 0;
+    this.laserCdT = 0;
 
     // 死在 BOSS 战就回到 BOSS 战，否则回到清杂兵
     this.state = this.bossActive ? 'boss' : 'play';
@@ -713,41 +760,163 @@ class Game {
     if (this.player.lives < 3) this.spawnPickup(b.x, b.y + 30, 'H');
   }
 
+  /** 普通保险：向前投出一枚高爆弹。
+   *  按下瞬间只给无敌（Player.useBomb 里设）+ 音效，真正的清弹与伤害在落点爆炸时结算——
+   *  玩家有 0.35 秒的"看着炸弹飞出去"的预期，比瞬间全屏爆炸更有分量。 */
   onBomb(player) {
-    this.flashT = 0.26;
-    this.shake(16);
+    this.bombDrops.push({
+      x: player.x,
+      y: player.y - 34,
+      vy: PLAYER.bombVy,
+      t: 0,
+      rot: 0
+    });
+    this.bombCdT = PLAYER.bombCd;
     SFX.bomb();
+    this.addParticle(player.x, player.y - 30, {
+      life: 0.2, r: 24, color: '#bfffe0', drag: 1
+    });
+  }
 
-    this._bombing = true;
-    // 清空全部敌方弹幕
-    for (const b of this.bullets) {
-      if (b.active && !b.friendly) {
-        b.active = false;
-        this.addParticle(b.x, b.y, {
-          vx: rand(-70, 70), vy: rand(-70, 70), life: 0.3, r: 4, color: '#ffffff'
+  /** 保险相关的持续状态：激光、在飞的高爆弹、冲击环、两种冷却。
+   *  单独抽出来是因为它必须在**所有"玩家还能动"的状态**里都跑一遍。
+   *  逐个状态手抄一遍的代价是很具体的：BOSS 预警期间漏抄 `_updateBombDrop`，
+   *  表现的画面就是"炸弹挂在半空、爆炸特效定住，等预警结束才继续"。
+   *  以后新增状态（比如过场、演出）时，只要玩家能操作，就别忘了调这里。 */
+  _updateBombSystems(dt) {
+    this._updateLaser(dt);
+    this._updateBombDrop(dt);
+    if (this.bombFx) {
+      this.bombFx.t += dt;
+      if (this.bombFx.t > 0.5) this.bombFx = null;
+    }
+    if (this.bombCdT > 0) this.bombCdT = Math.max(0, this.bombCdT - dt);
+    if (this.laserCdT > 0) this.laserCdT = Math.max(0, this.laserCdT - dt);
+  }
+
+  /** 炸弹飞行：抛物线上升 → 到点引爆 */
+  _updateBombDrop(dt) {
+    for (let i = this.bombDrops.length - 1; i >= 0; i--) {
+      const b = this.bombDrops[i];
+      b.t += dt;
+      b.vy += PLAYER.bombAy * dt;
+      b.y += b.vy * dt;
+      b.rot += dt * 6;
+      // 引信火花
+      if (Math.random() < 0.7) {
+        this.addParticle(b.x + rand(-3, 3), b.y + 9, {
+          vx: rand(-24, 24), vy: rand(30, 80), life: 0.26, r: 3, color: '#ffd166'
         });
       }
+      if (b.t >= PLAYER.bombThrow) {
+        this.bombDrops.splice(i, 1);
+        this._bombBoom(b);
+      }
     }
-    // 小怪直接清场，BOSS 吃固定伤害
-    // 注意：这里必须远高于任何小怪血量。3.3.0 血量上调后 heavy 有 155 血，
-    // 原来固定 30 伤害会留下半屏残机，保险就不再是“清屏”了。
-    for (const e of this.enemies) {
-      if (!e.active) continue;
-      // 蛇头的设计就是"难打"：一颗保险带走会让这个目标直接消失
-      if (e.kind === 'snakeHead') e.hit(180, null, this);
-      else e.hit(9999, null, this);
-    }
-    if (this.bossActive && !this.boss.dead) this.boss.hit(160, this);
-    this._bombing = false;
+  }
 
-    // 冲击波
-    for (let i = 0; i < 28; i++) {
-      const a = (i / 28) * Math.PI * 2;
-      this.addParticle(player.x, player.y, {
-        vx: Math.cos(a) * 540, vy: Math.sin(a) * 540,
-        life: 0.55, r: 6, color: '#bfffe0', drag: 0.86
+  /** 爆炸结算：清全屏敌弹（保命核心）+ 只伤爆炸圈内的敌人 */
+  _bombBoom(b) {
+    const R = PLAYER.bombRadius;
+
+    // 1) 清空全部敌方弹幕。只清敌方：自机弹是我方输出，被自己人炸掉等于变相断火力
+    for (const bu of this.bullets) {
+      if (!bu.active || bu.friendly) continue;
+      bu.active = false;
+      this.addParticle(bu.x, bu.y, {
+        vx: rand(-70, 70), vy: rand(-70, 70), life: 0.3, r: 4, color: '#ffffff'
       });
     }
+
+    // 2) 圈内小怪：秒杀（血量再高也清），蛇头例外
+    // _bombing 置位期间 onEnemyKilled 不掉道具，否则一颗雷能刷满地道具
+    this._bombing = true;
+    for (const e of this.enemies) {
+      if (!e.active) continue;
+      if (dist2(b.x, b.y, e.x, e.y) > (R + e.r) * (R + e.r)) continue;
+      if (e.kind === 'snakeHead') e.hit(PLAYER.bombSnakeDmg, null, this);
+      else e.hit(9999, null, this);
+    }
+    // 3) BOSS：轮廓只要被爆炸圈罩住就吃固定伤害（用与撞机/子弹同一套轮廓判定）
+    if (this.bossActive && !this.boss.dead && this._bossHits(this.boss, b.x, b.y, R)) {
+      this.boss.hit(PLAYER.bombBossDmg, this);
+    }
+    this._bombing = false;
+
+    // 4) 特效：大白闪 + 震屏 + 大爆炸 + 环形冲击
+    this.flashT = 0.26;
+    this.shake(16);
+    this.explode(b.x, b.y, 2.4, '#ffd166', 36);
+    for (let i = 0; i < 34; i++) {
+      const a = (i / 34) * Math.PI * 2;
+      const sp = 560 * (0.55 + Math.random() * 0.6);
+      this.addParticle(b.x, b.y, {
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 0.62, r: 6, color: i % 3 ? '#ffd166' : '#ffffff', drag: 0.87
+      });
+    }
+    this.addParticle(b.x, b.y, {
+      life: 0.2, r: 34, color: '#ffffff', drag: 1
+    });
+    // 冲击环单独用一个记录来画：粒子是"实心圆缩小"，半径两百时会变成一块灰饼
+    this.bombFx = { x: b.x, y: b.y, t: 0 };
+    SFX.explode(true);
+  }
+
+  /** 爆炸冲击环：半径向外扩、线条变细并渐隐，比实心圆更像爆炸 */
+  _drawBombFx(ctx) {
+    const fx = this.bombFx;
+    if (!fx) return;
+    const k = fx.t / 0.5;                       // 0 → 1
+    if (k >= 1) return;
+    const rr = PLAYER.bombRadius * (0.3 + k * 0.78);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = (1 - k) * 0.8;
+    ctx.strokeStyle = '#ffe9a8';
+    ctx.lineWidth = 12 * (1 - k) + 2;
+    ctx.beginPath();
+    ctx.arc(fx.x, fx.y, rr, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** 高爆弹外观：深色弹体 + 亮黄描边 + 引信火苗；越接近引爆闪得越快 */
+  _drawBombDrop(ctx) {
+    for (const b of this.bombDrops) this._drawOneBombDrop(ctx, b);
+  }
+
+  _drawOneBombDrop(ctx, b) {
+    const k = b.t / PLAYER.bombThrow;                       // 0 → 1
+    const blink = k > 0.6 && Math.floor(b.t * 26) % 2 === 0;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const gr = 26 + k * 18;
+    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, gr);
+    g.addColorStop(0, blink ? 'rgba(255,255,255,0.72)' : 'rgba(255,209,102,' + (0.28 + k * 0.38) + ')');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, gr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rot);
+    ctx.fillStyle = 'rgba(22,24,32,0.96)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 11, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = blink ? '#ffffff' : '#ffd166';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = blink ? '#ffffff' : '#fff2c4';
+    ctx.beginPath();
+    ctx.arc(0, -11, 3.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   /** BOSS 呼叫支援：从机体两侧放出少量小怪（血量削弱到 55%） */
@@ -1297,6 +1466,12 @@ class Game {
 
     if (this.paused) return;
 
+    // 调试：无限保险——每帧补满，连按也不会消耗完（普通与激光两种一起管）
+    if (this.infiniteBombs) {
+      this.player.bombs = PLAYER.maxBombs;
+      this.player.lasers = PLAYER.maxLaserBombs;
+    }
+
     if (this.state === 'title') {
       this._updateStars(dt);
       return;
@@ -1319,6 +1494,7 @@ class Game {
       this._updateBullets(dt);
       this._updatePickups(dt);        // 预警不是暂停，掉落物要继续下落
       this._collectPickups();         // 也必须能捡
+      this._updateBombSystems(dt);    // 预警不是暂停：在飞的炸弹/激光/冲击环照样走
       if (this.warnT <= 0) this.spawnBoss();
       return;
     }
@@ -1328,6 +1504,7 @@ class Game {
       this._updateParticles(dt);
       this._updateBullets(dt);
       this._updatePickups(dt);
+      this._updateBombSystems(dt);    // 同上：结算期的炸弹要能落地
       this.player.update(dt, this._inputFor(dt), this);   // 结算期间可自由移动吃道具
       this._collectPickups();
       if (this.clearT <= 0) {
@@ -1335,6 +1512,7 @@ class Game {
           this.startLevel(this.levelIdx + 1, true);
         } else {
           this.state = 'win';
+          this.winT = 0;      // 刚进通关页：输入锁与提示渐显都从这里起算
         }
       }
       return;
@@ -1350,6 +1528,7 @@ class Game {
     }
 
     if (this.state === 'win') {
+      this.winT += dt;
       this._updateParticles(dt);
       return;
     }
@@ -1357,7 +1536,7 @@ class Game {
     /* ---- play / boss ---- */
     const inp = this._inputFor(dt);
     this.player.update(dt, inp, this);
-    this._updateLaser(dt);
+    this._updateBombSystems(dt);
     this._updateBullets(dt);
     this._updateSnake(dt);
     this._updateEnemies(dt);
@@ -1612,6 +1791,7 @@ class Game {
     L.state = 1;      // 蓄力
     L.t = 0;
     L.tickT = 0;
+    this.laserCdT = PLAYER.laserCd;    // 和普通保险各算各的，互不影响
     SFX.laserCharge();
     return true;
   }
@@ -2414,6 +2594,9 @@ class Game {
 
     // 子弹
     for (const b of this.bullets) if (b.active) b.draw(ctx);
+    // 保险投出的高爆弹（画在子弹之上，别被敌弹盖住）
+    this._drawBombDrop(ctx);
+    this._drawBombFx(ctx);
     // 粒子
     for (const p of this.particles) if (p.active) p.draw(ctx);
     // 阵亡残骸：一团逐渐冷却的光，填满 1.5 秒的空档
@@ -2692,6 +2875,21 @@ class Game {
     ctx.textAlign = 'left';   // textBaseline 由 restore 还原，别在这里改
   }
 
+  /** 冷却进度环：从 12 点顺时针缩短，环消失 = 可以再按。
+   *  不做整体遮罩，因为按钮中央还要显示剩余数量，盖住反而看不清剩几颗。 */
+  _drawCdRing(ctx, x, y, r, t, max, color) {
+    if (t <= 0 || max <= 0) return;
+    const k = clamp(t / max, 0, 1);                 // 1 → 0
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, r + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   _drawBombButton(ctx) {
     const { x, y, r } = BOMB_BTN;
     const n = this.player.bombs;
@@ -2715,6 +2913,9 @@ class Game {
       ctx.fillRect(x - r * 2, y - r * 2, r * 4, r * 4);
       ctx.globalCompositeOperation = 'source-over';
     }
+
+    // 冷却进度环：连点被吃掉时，玩家要能看出"是按不动"而不是"按键失灵"
+    this._drawCdRing(ctx, x, y, r, this.bombCdT, PLAYER.bombCd, '#7dff9e');
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -2753,6 +2954,9 @@ class Game {
       ctx.fillRect(x - r * 2, y - r * 2, r * 4, r * 4);
       ctx.globalCompositeOperation = 'source-over';
     }
+
+    // 激光冷却从按下算（含 6.8s 的蓄力+发射），环走完之前按了也不会生效
+    this._drawCdRing(ctx, x, y, r, this.laserCdT, PLAYER.laserCd, '#b48cff');
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -3157,6 +3361,7 @@ class Game {
     if (on) {
       for (const b of this._devButtons) {
         const active = (b.id === 'god' && this.god) ||
+                       (b.id === 'infbomb' && this.infiniteBombs) ||
                        (b.id === 'hitbox' && this.showHitbox);
         ctx.fillStyle = active ? 'rgba(20,58,40,0.94)' : 'rgba(10,17,25,0.90)';
         ctx.fillRect(b.x, b.y, b.w, b.h);
@@ -3286,14 +3491,25 @@ class Game {
       ctx.fillStyle = '#eaf6ff';
       ctx.font = '18px ui-monospace, monospace';
       ctx.fillText('SCORE  ' + this.score, cx, VIEW.h * 0.38 + 44);
-      ctx.fillStyle = 'rgba(150,200,230,0.75)';
-      ctx.font = '13px "PingFang SC", sans-serif';
-      ctx.fillText('点击 / 空格 再来一轮', cx, VIEW.h * 0.38 + 92);
+      // 通关页前 2 秒锁输入：提示文字同步换成"请稍候"，否则玩家会以为点击失效
+      if (this.winT >= WIN_INPUT_LOCK) {
+        const a = Math.min(1, (this.winT - WIN_INPUT_LOCK) / 0.4);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = 'rgba(150,200,230,0.75)';
+        ctx.font = '13px "PingFang SC", sans-serif';
+        ctx.fillText('点击 / 空格 再来一轮', cx, VIEW.h * 0.38 + 92);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = 'rgba(120,150,175,0.5)';
+        ctx.font = '13px "PingFang SC", sans-serif';
+        ctx.fillText('请稍候…', cx, VIEW.h * 0.38 + 92);
+      }
 
-      // 通关致谢：贴画面底部单独一行，不和上面的操作提示挤在一起
-      ctx.fillStyle = 'rgba(190,220,240,0.7)';
-      ctx.font = '14px "PingFang SC", sans-serif';
-      ctx.fillText('感谢你游玩本游戏', cx, VIEW.h * 0.80);
+      // 通关致谢：原来贴在 0.80H，下方空出一大片、像掉在页面底部；
+      // 现在 0.62H + 18px，和 SCORE 同级、和上面的操作提示留一段呼吸
+      ctx.fillStyle = 'rgba(200,228,248,0.78)';
+      ctx.font = '18px "PingFang SC", sans-serif';
+      ctx.fillText('感谢你游玩本游戏', cx, VIEW.h * 0.62);
       ctx.restore();
       ctx.textAlign = 'left';
     }

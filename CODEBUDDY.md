@@ -87,6 +87,8 @@ node /root/.codebuddy/skills/sites/scripts/publish.js --dir /workspace/raiden-li
 - **`assets/` 是生成物**：改美术走 `gen_assets.py`，不要手动改 PNG 或 `atlas.js`
 - **纯全局脚本，无模块系统**：新增文件要在 `index.html` 里按顺序加 `<script>`，且带 `?v=`
 - **对象池复用**：`Bullet` / `Particle` / `Pickup` / `Enemy` 都是池对象，跨帧持引用前先确认它没被回收
+- **触摸输入必须带 `pointerId`**：输入只有一个 `pointerActive`，`pointerup` 又不看是谁抬的手 —— 一只手拖飞机、另一只手点保险/声音，抬手指就会把拖动状态清掉，表现为"飞机卡住，要重新触屏"。`input.pointerId` 记的是控制权归属，`pointermove` / `pointerup` 都要先比对它。以后加任何新的触屏控件，注意别让它抢走控制权（按钮分支要在赋值之前 return）
+- **状态分支要共用更新入口**：`_update()` 里按 `state` 分叉时，别在每个分支各抄一份"要更新什么"。保险/激光/冲击环/冷却统一走 `_updateBombSystems(dt)`，`play`/`boss`/`warn`/`clear` 都调 —— 3.20.4 就是预警分支漏抄，导致炸弹挂在半空、特效定格。同理，判断"能不能按保险"只认 `_canUseBomb()`，不要在 `onDown` 里另写一份状态列表
 - 性能目标：60fps（480×854 画布），改动后跑一次冒烟看 `fps` 字段
 
 ## 协作偏好
