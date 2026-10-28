@@ -110,7 +110,7 @@ git pull --rebase        # 或简写 git sync（已设别名）
 
 ## 版本
 
-当前 **3.18.2**。完整变更记录（每个版本改了什么、踩过哪些坑）见
+当前 **3.19.0**。完整变更记录（每个版本改了什么、踩过哪些坑）见
 [`raiden-lite/README.md`](raiden-lite/README.md)。
 
 ## 仓库用途
