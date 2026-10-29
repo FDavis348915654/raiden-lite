@@ -25,6 +25,15 @@ class Bullet {
     this.boom = opt.boom || null;   // 命中后的范围爆炸 { r, dmg }
     this.fuse = opt.fuse === undefined ? 0 : opt.fuse;  // 引信：到时炸开
     this.chain = opt.chain || 0;    // 电弧链式跳数
+    this.wideBlock = !!opt.wideBlock;  // 宽头弹：飞行途中吸掉敌方子弹
+    /* 狙击弹：两段速度。前半段几乎"悬停"滑行（96px/s），snipe.delay 秒后
+     * 沿**发射瞬间**的方向猛加速到 snipe.speed。
+     * 不做跟踪是有意的：跟踪弹玩家只能靠躲，狙击弹可以靠"看红环 → 横移"破。 */
+    this.snipe = opt.snipe || null;
+    this.snipeMax = this.snipe ? this.snipe.delay : 0;
+    this.snipeT = this.snipeMax;
+    this.boostFx = 0;               // 加速瞬间的白光残影
+    this.defT = 0;                  // 刚被偏折过：短期内不再吃第二次偏折
     this.hits = opt.pierce ? [] : null;
     this.bossT = 0;                 // 穿透弹对 BOSS 的命中间隔
     this.active = true;
@@ -32,6 +41,24 @@ class Bullet {
 
   update(dt, game) {
     if (this.bossT > 0) this.bossT -= dt;
+    if (this.defT > 0) this.defT -= dt;
+    if (this.boostFx > 0) this.boostFx -= dt;
+
+    // 狙击弹的"起爆"：只改速度大小，方向沿用发射时算好的那一条
+    if (this.snipeT > 0) {
+      this.snipeT -= dt;
+      if (this.snipeT <= 0) {
+        const sp = this.snipe.speed;
+        const a = Math.atan2(this.vy, this.vx);
+        this.vx = Math.cos(a) * sp;
+        this.vy = Math.sin(a) * sp;
+        this.rot = a + Math.PI / 2;
+        this.snipeT = 0;
+        this.snipe = null;
+        this.boostFx = 0.18;
+        SFX.snipeFire();
+      }
+    }
 
     // 引信：飞到时间就炸开（散榴弹）
     if (this.fuse > 0) {
@@ -73,6 +100,51 @@ class Bullet {
 
   draw(ctx) {
     Assets.drawBullet(ctx, this.kind, this.x, this.y, this.rot);
+
+    // 狙击弹的蓄力段：一圈从外向内收的红色准星环 + 一小段方向线。
+    // 没有这个提示，玩家只能"看到弹突然变快"，那是纯惩罚而不是机制。
+    if (this.snipeT > 0) {
+      const k = 1 - this.snipeT / this.snipeMax;      // 0 → 1
+      const r = 26 - k * 16;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = 'rgba(255,90,90,' + (0.45 + k * 0.5).toFixed(2) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // 准星的四条刻度，说明"这是瞄着你来的"
+      const a0 = Math.atan2(this.vy, this.vx);
+      for (let i = 0; i < 4; i++) {
+        const a = a0 + i * Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(this.x + Math.cos(a) * (r + 3), this.y + Math.sin(a) * (r + 3));
+        ctx.lineTo(this.x + Math.cos(a) * (r + 9), this.y + Math.sin(a) * (r + 9));
+        ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(255,120,120,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y);
+      ctx.lineTo(this.x + Math.cos(a0) * 110, this.y + Math.sin(a0) * 110);
+      ctx.stroke();
+      ctx.restore();
+    } else if (this.boostFx > 0) {
+      // 加速瞬间的白光：让"突然变快"有一帧可见的因果
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = this.boostFx / 0.18;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.4;
+      const a0 = Math.atan2(this.vy, this.vx);
+      ctx.beginPath();
+      ctx.moveTo(this.x - Math.cos(a0) * 26, this.y - Math.sin(a0) * 26);
+      ctx.lineTo(this.x, this.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 15, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 }
 
@@ -201,6 +273,23 @@ class Pickup {
     const c = this.kind === 'W'
       ? WEAPONS[this.weapon].color
       : (PICKUP_COLORS[this.kind] || '#ffffff');
+    // 临时增益画成菱形，其余是圆形：它们的强度是"一段时间的战术优势"，
+    // 到期就没了，不该和 P/B/H 这些永久成长看起来一样
+    const isTemp = this.kind === 'S' || this.kind === 'T' ||
+      this.kind === 'D' || this.kind === 'A';
+    const shape = () => {
+      ctx.beginPath();
+      if (isTemp) {
+        const s = 12;
+        ctx.moveTo(0, -s);
+        ctx.lineTo(s, 0);
+        ctx.lineTo(0, s);
+        ctx.lineTo(-s, 0);
+        ctx.closePath();
+      } else {
+        ctx.arc(0, 0, 11, 0, Math.PI * 2);
+      }
+    };
     const pulse = 1 + Math.sin(this.t * 6) * 0.08;
     ctx.save();
     ctx.translate(this.x, this.y);
@@ -215,8 +304,7 @@ class Pickup {
     ctx.fill();
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = 'rgba(8,14,22,0.9)';
-    ctx.beginPath();
-    ctx.arc(0, 0, 11, 0, Math.PI * 2);
+    shape();
     ctx.fill();
     ctx.strokeStyle = c;
     ctx.lineWidth = 2;
@@ -246,7 +334,12 @@ class Pickup {
   }
 }
 
-const PICKUP_COLORS = { P: '#66e0ff', W: '#ffc857', B: '#7dff9e', H: '#ff7a8a', O: '#a8f4ff', R: '#ff8ce0', L: '#b48cff' };
+const PICKUP_COLORS = {
+  P: '#66e0ff', W: '#ffc857', B: '#7dff9e', H: '#ff7a8a',
+  O: '#a8f4ff', R: '#ff8ce0', L: '#b48cff',
+  // 临时增益：统一走冷色/暖色两套，和上面的"永久成长"道具区分开
+  S: '#9fe8ff', T: '#ffa060', D: '#7bffcf', A: '#c9b0ff'
+};
 
 /* ---------------------------------------------------------------- 玩家 */
 class Player {
@@ -265,6 +358,9 @@ class Player {
     this.orbits = [];                // 环绕机
     this.orbitBoostT = 0;            // 超额吃 R 的加速剩余时间
     this.lasers = PLAYER.laserBombs; // 激光保险数量
+    this.shield = null;              // 临时护盾 { hp, max, t, hitT }
+    this.tempWpn = null;             // 临时武器 { id:'track'|'wide', t, cd }
+    this.tempAlly = null;            // 临时僚机 { t, x, y, slotT }
     this.resetStage();
   }
 
@@ -285,6 +381,13 @@ class Player {
     this.slotT = this.weapons.map(() => 0);   // 换关清零冷却
     this.shotQ = [];                          // 错峰队列也清空，免得上一关的子弹跨关冒出
     for (const o of this.options) o.slotT = [0.12, 0.26];
+    // 临时效果跨关保留（剩余时间继续走），只把位置拉回机身旁边，
+    // 否则换关后临时僚机会从上一关的位置一路飘过来
+    if (this.tempAlly) {
+      this.tempAlly.x = this.x;
+      this.tempAlly.y = this.y + TEMP.ally.oy;
+      this.tempAlly.slotT = 0.2;
+    }
   }
 
   /** 主武器（第一个槽），HUD 与僚机用 */
@@ -389,6 +492,7 @@ class Player {
     this._flushShots(dt, game);   // 错峰队列：火神炮的后续子弹在这一帧出膛
     this._updateOptions(dt, game);
     this._updateOrbits(dt);
+    this._updateTemp(dt, game);   // 临时增益：计时、自动开火、临时僚机跟随
   }
 
   /** 环绕机：绕机身匀速转；超额吃 R 时短暂加速 */
@@ -456,16 +560,129 @@ class Player {
     }
   }
 
+  /* ---------------- 临时增益（护盾 / 临时武器 / 临时僚机） ----------------
+   * 三类都不占武器槽：临时武器直接由这里开火，玩家无法（也不需要）切到它。
+   * 计时统一在这里推进，到期清空并通知 game 播一次提示，免得"道具突然没了"。
+   */
+
+  /** 吃 S：护盾。重复吃 → 时间与耐久都补满，不叠加 */
+  gainShield(game) {
+    const C = TEMP.shield;
+    this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0 };
+    game.onTempGain(this, 'shield');
+  }
+
+  /** 吃 T / D：临时武器。重复吃同一把 → 只刷新时间 */
+  gainTempWpn(game, id) {
+    const C = TEMP[id];
+    const same = this.tempWpn && this.tempWpn.id === id;
+    this.tempWpn = { id, t: C.dur, cd: same ? this.tempWpn.cd : 0.1 };
+    game.onTempGain(this, id);
+  }
+
+  /** 吃 A：临时僚机。已在场时再吃 → 刷新时间，并补一段无敌
+   *  （和正式僚机满员吃 O 同待遇：冗余的僚机道具别只剩"刷新计时"这一件事） */
+  gainTempAlly(game) {
+    const t = TEMP.ally.dur;
+    if (this.tempAlly) {
+      this.tempAlly.t = t;
+      this.invuln = Math.max(this.invuln, PLAYER.optionInvuln);
+    } else {
+      this.tempAlly = { t, x: this.x, y: this.y + TEMP.ally.oy, slotT: 0.12 };
+    }
+    game.onTempGain(this, 'ally');
+  }
+
+  /** 推进三种临时状态；到期各自清空 */
+  _updateTemp(dt, game) {
+    // 护盾：时间到或被打穿就消失
+    const sh = this.shield;
+    if (sh) {
+      sh.t -= dt;
+      if (sh.hitT > 0) sh.hitT -= dt;
+      if (sh.t <= 0 || sh.hp <= 0) {
+        this.shield = null;
+        game.onTempEnd(this, 'shield');
+      }
+    }
+
+    // 临时武器：自动开火。canFire 在结算/死亡时为 false，这里跟着停，
+    // 否则结算页上还在喷弹幕
+    const tw = this.tempWpn;
+    if (tw) {
+      tw.t -= dt;
+      if (tw.t <= 0) {
+        this.tempWpn = null;
+        game.onTempEnd(this, tw.id);
+      } else if (this.canFire) {
+        tw.cd -= dt;
+        if (tw.cd <= 0) {
+          this._fireTemp(game, tw);
+          tw.cd = TEMP[tw.id].cd;
+        }
+      }
+    }
+
+    // 临时僚机：到点消失
+    const ta = this.tempAlly;
+    if (ta) {
+      ta.t -= dt;
+      if (ta.t <= 0) {
+        this.tempAlly = null;
+        game.onTempEnd(this, 'ally');
+      } else {
+        this._updateTempAlly(dt, game, ta);
+      }
+    }
+  }
+
+  /** 临时武器开火：不占槽、不吃 SLOT_DMG，也不进错峰队列（本身射速就慢） */
+  _fireTemp(game, tw) {
+    if (tw.id === 'track') {
+      const C = TEMP.track;
+      game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
+        kind: 'track', r: C.r, homing: C.homing, life: 3,
+        boom: { r: C.boomR, dmg: C.boomDmg }
+      });
+    } else {
+      const C = TEMP.wide;
+      game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
+        kind: 'wide', r: C.r, life: 1.6, wideBlock: true
+      });
+    }
+    SFX.shoot();
+  }
+
+  /** 临时僚机：只跟主槽，伤害 0.6、射速再压一档，不能盖过正式僚机 */
+  _updateTempAlly(dt, game, ta) {
+    const C = TEMP.ally;
+    const k = Math.min(1, 7.5 * dt);
+    ta.x += (this.x - ta.x) * k;
+    ta.y += (this.y + C.oy - ta.y) * k;
+
+    const wi = this.weapons[0];
+    if (wi === undefined) return;
+    ta.slotT -= dt;
+    if (ta.slotT > 0 || !this.canFire) return;
+    this.fireFrom(game, ta.x, ta.y - 18, C.mul, Math.min(C.powMax, this.power), wi);
+    ta.slotT = WEAPONS[wi].cd * 1.6;
+  }
+
   fire(game) {
     this.fireFrom(game, this.x, this.y - 34, 1);
   }
 
-  /** 按槽位开火：第 2/3 槽左右微偏，伤害按 SLOT_DMG 递减 */
+  /** 按槽位开火：副槽在机身上左右分开，伤害按 SLOT_DMG 递减。
+   *  主槽（0）必须居中：切枪是"换掉主槽的武器"，出膛点要是跟着变，
+   *  每次切枪弹流都会横向跳一下，手感像飞机被推了一把。
+   *  4 号槽没有第 5 个横向位置可用，改为抬高 8px —— 同一横坐标上两条弹流
+   *  会被误认成一条，纵向错开才能一眼数出"现在是四路火力"。 */
   fireSlot(game, s2) {
     const idx = this.weapons[s2];
     if (idx === undefined) return;
-    const off = s2 === 0 ? 0 : (s2 === 1 ? -9 : 9);
-    this.fireFrom(game, this.x + off, this.y - 34, SLOT_DMG[s2] || 1, null, idx, s2 > 0);
+    const off = s2 === 0 ? 0 : (s2 === 1 ? -14 : (s2 === 2 ? 14 : 0));
+    const up = s2 === 3 ? 8 : 0;
+    this.fireFrom(game, this.x + off, this.y - 34 - up, SLOT_DMG[s2] || 1, null, idx, s2 > 0);
   }
 
   /** 错峰发射：把一轮里的后续子弹排进队列，到点才真正出膛。
@@ -663,24 +880,45 @@ class Player {
       return 'add';
     }
 
-    // 槽满：挤掉最旧的副武器，主武器不动
+    // 槽满：挤掉最旧的副武器，主武器不动（主武器换不换由玩家点槽位决定）
     const out = this.weapons[1];
     this.weapons.splice(1, 1);
     this.weapons.push(idx);
+    // 冷却表必须跟着一起挪：只搬 weapons 的话，新武器会继承被挤掉那把的剩余冷却，
+    // 而被前移到 1 号位的武器又换了个计时器，表现为"刚拿到就打不出来"
+    if (this.slotT && this.slotT.length === WEAPON_SLOTS) {
+      this.slotT.splice(1, 1);
+      this.slotT.push(0);
+    }
     game.onWeaponReplaced(this, out, idx);
     return 'replace';
   }
 
-  /** 调试用：循环切主武器 */
-  switchWeapon(game) {
-    this.weapons[0] = (this.weapons[0] + 1) % WEAPONS.length;
-    this.slotT[0] = 0;
-    game.onWeaponChanged(this);
+  /** 切主武器：把目标槽的武器轮转到 0 号位。
+   *  伤害与冷却都按"位置"算（SLOT_DMG / slotT），所以必须整条轮转、把冷却一起搬走；
+   *  只改索引的话，新主武器会继承上一把的剩余冷却，手感上像"切了但没准备好"。
+   *  slot 省略 → 依次切下一把（循环）；指定 slot → 直接把它调到主位。 */
+  switchWeapon(game, slot) {
+    const n = this.weapons.length;
+    if (n <= 1) return false;                       // 只有一把，没什么可切
+    // 槽位与冷却表必须等长：调试面板可能直接改 weapons，长度对不上时整表重建，
+    // 不然 shift/push 会把 undefined 塞进冷却表，之后减 dt 变成 NaN 永不开火
+    if (!this.slotT || this.slotT.length !== n) this.slotT = this.weapons.map(() => 0);
+    const to = (slot === undefined || slot < 0 || slot >= n) ? 1 : slot;
+    if (to === 0) return false;
+    for (let k = 0; k < to; k++) {
+      this.weapons.push(this.weapons.shift());
+      this.slotT.push(this.slotT.shift());
+    }
+    // 切上来的武器立刻能开火：还要等 0.3 秒才出声，会被当成"切枪卡顿"
+    this.slotT[0] = Math.min(this.slotT[0], 0.06);
+    game.onWeaponChanged(this, to);
+    return true;
   }
 
-  /** 火力满级后再吃同款武器：按当前主武器打出一轮"超规格"环射 + 短时射速强化
-   * 形状表见 config.js 的 OVERDRIVE.shapes：外层快、内层慢，
-   * 弹数和单发伤害都远超常规射击，命中时才有"这发不一样"的实感。 */
+  /** 火力满级后再吃同款武器：按**当前主武器**打出一轮"超规格"弹幕 + 短时射速强化
+   * 形状表见 config.js 的 OVERDRIVE.shapes，9 种武器各有各的几何：
+   * 整圈 / 前向扇面 / 前后对开，靠 arc + aim 描述，见下方取值方式。 */
   overdrive(game) {
     game._shotMul = 1;                 // 不吃僚机 / 副槽的伤害折扣
     const id = WEAPONS[this.weapons[0]].id;
@@ -688,8 +926,15 @@ class Player {
     for (let L = 0; L < layers.length; L++) {
       const lay = layers[L];
       const rot = lay.rot || 0;
+      const arc = lay.arc === undefined ? Math.PI * 2 : lay.arc;
+      const aim = lay.aim === undefined ? -Math.PI / 2 : lay.aim;
+      const full = arc >= Math.PI * 2 - 0.001;
       for (let i = 0; i < lay.n; i++) {
-        const a = (i / lay.n) * Math.PI * 2 + rot + rand(-0.03, 0.03);
+        // 整圈按 i/n 均分（首尾不重合）；扇面按 i/(n-1)，两端都落在边界上——
+        // 扇面用 i/n 的话最后总会缺一角，151° 的"弹墙"会变成一边空一边密。
+        const a = full
+          ? (i / lay.n) * Math.PI * 2 + rot
+          : aim - arc / 2 + (lay.n === 1 ? arc / 2 : (i * arc) / (lay.n - 1)) + rot;
         game.spawnPlayerBullet(this.x, this.y, Math.cos(a) * lay.sp, Math.sin(a) * lay.sp, lay.dmg, {
           kind: lay.kind || 'player',
           r: lay.r || 9,
@@ -698,6 +943,9 @@ class Player {
           homing: lay.homing,
           boom: lay.boom,
           chain: lay.chain,
+          // 榴弹引信按发射顺序错开：同时炸成一片会更像"一发大爆炸"，
+          // 错开 0.12 秒才是"一片弹陆续在空中开花"
+          fuse: lay.fuse ? lay.fuse + (i / lay.n) * 0.12 : undefined,
           noRear: true                   // 伤害已按"全弹发射"给足，不再叠后向倍率
         });
       }
@@ -732,11 +980,19 @@ class Player {
     // 致命一击不再额外降火力：命都没了，续关回来还得能打
     if (this.lives > 0) this.power = Math.max(1, this.power - 1);
     SFX.playerHit();
-    game.shake(18);
-    game.explode(this.x, this.y, 1.1, '#7fd6ff', 22);
+    /* 受击反馈：震屏给到 0.46 秒（默认 0.32 太短，玩家还没意识到挨枪就结束了），
+     * 半径 18 震不出"被撞了一下"的重量感；爆炸也放大一圈，让机位一眼可见。 */
+    game.shake(26, 0.46);
+    game.onPlayerHurt();
+    game.explode(this.x, this.y, 1.6, '#7fd6ff', 36);
     if (this.lives <= 0) {
       this.alive = false;
       this.canFire = false;
+      // 临时增益不跟到续关：护盾/临时武器/僚机是"这一段战斗的战术优势"，
+      // 带着它们复活等于把一条命的价值翻倍
+      this.shield = null;
+      this.tempWpn = null;
+      this.tempAlly = null;
       game.onPlayerDying();
     }
     return true;
@@ -786,20 +1042,144 @@ class Player {
       ctx.restore();
     }
 
-    // 无敌护罩
+    /* 无敌护罩：受击后 2.8 秒，玩家必须能一眼看出"现在吃弹不疼"。
+     * 单圈细线在弹幕里会被误当成背景装饰，改成内实外虚的双层环 + 反向旋转；
+     * 最后 0.6 秒开始闪烁，提示无敌即将结束（否则玩家会按"还在无敌"去撞弹）。 */
     if (this.invuln > 0) {
+      const fade = this.invuln < 0.6 && Math.floor(this.t * 18) % 2 === 0 ? 0.3 : 1;
       ctx.save();
-      ctx.globalAlpha = 0.25 + Math.sin(this.t * 12) * 0.1;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = (0.45 + Math.sin(this.t * 14) * 0.16) * fade;
       ctx.strokeStyle = '#8fe8ff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.4;
       ctx.beginPath();
-      ctx.arc(this.x, this.y, 22, 0, Math.PI * 2);
+      ctx.arc(this.x, this.y, 26, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.globalAlpha = (0.34 + Math.sin(this.t * 9 + 1) * 0.10) * fade;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([9, 9]);
+      ctx.lineDashOffset = -this.t * 26;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 33, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
 
+    this._drawShield(ctx);
     this._drawOptions(ctx);
+    this._drawTempAlly(ctx);
     this._drawOrbits(ctx);
+  }
+
+  /** 护盾：机头前方的半椭圆挡板。耐久越低越红，挡下子弹的瞬间整片闪白。
+   *  画半椭圆而不是整只椭圆：整只读起来像"包住机头的气泡"，玩家会以为背后也安全；
+   *  只留上半个 + 一条平的截口，才读作"一面朝向弹幕的盾"。
+   *  判定是 TEMP.shield 的 rx/ry（上半个），这里画得略大一圈，视觉上"罩住"机头。 */
+  _drawShield(ctx) {
+    const s = this.shield;
+    if (!s) return;
+    const C = TEMP.shield;
+    const cx = this.x;
+    const cy = this.y - C.oy;
+    const k = Math.max(0, s.hp / s.max);            // 1 → 0
+    const hot = s.hitT > 0;
+    const rgb = hot ? '255,255,255'
+      : (k > 0.5 ? '150,226,255' : (k > 0.25 ? '255,208,120' : '255,110,110'));
+    const rx = C.rx * 1.16;
+    const ry = C.ry * 1.12;
+    const A0 = Math.PI, A1 = Math.PI * 2;          // canvas 的 0 在右侧，上半圈是 π→2π
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // 内部辉光：只填上半个。closePath 补出的那条直线就是盾的截口
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rx);
+    g.addColorStop(0, 'rgba(' + rgb + ',' + (hot ? 0.55 : 0.24 + k * 0.12).toFixed(2) + ')');
+    g.addColorStop(0.7, 'rgba(' + rgb + ',0.06)');
+    g.addColorStop(1, 'rgba(' + rgb + ',0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, A0, A1);
+    ctx.closePath();
+    ctx.fill();
+
+    // 外缘：剩余时间不足 5 秒开始闪，提醒"要过期了"
+    const blink = s.t < 5 ? (0.45 + Math.sin(this.t * 18) * 0.35) : 0.85;
+    ctx.globalAlpha = hot ? 1 : blink;
+    ctx.strokeStyle = 'rgba(' + rgb + ',0.95)';
+    ctx.lineWidth = hot ? 2.6 : 1.8;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, A0, A1);
+    ctx.stroke();
+
+    // 截口：没有这条平线，半椭圆会被读成"拱门"或"半个气泡"，
+    // 有了它才是"一面挡在前方的板"——也正是玩家该理解的功能边界
+    ctx.globalAlpha = (hot ? 0.95 : blink) * 0.6;
+    ctx.lineWidth = hot ? 2.2 : 1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx - rx, cy);
+    ctx.lineTo(cx + rx, cy);
+    ctx.stroke();
+
+    // 内侧弧：做出"能量层有厚度"的感觉（原来是气泡的赤道线）
+    ctx.globalAlpha = (hot ? 0.9 : blink) * 0.5;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx * 0.84, ry * 0.6, 0, Math.PI * 1.08, Math.PI * 1.92);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** 临时僚机：紫色光球，配色和正式僚机（青色）区分开 */
+  _drawTempAlly(ctx) {
+    const a = this.tempAlly;
+    if (!a) return;
+    // 剩不到 3 秒开始闪，提示"这架要走了"
+    const blink = a.t < 3 ? (0.4 + Math.sin(this.t * 20) * 0.35) : 1;
+
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(a.x, a.y, 0, a.x, a.y, 30);
+    g.addColorStop(0, 'rgba(190,150,255,0.42)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = blink;
+    // 尾焰
+    ctx.globalCompositeOperation = 'lighter';
+    const len = 12 + Math.sin(this.t * 34) * 3;
+    const fg = ctx.createLinearGradient(a.x, a.y + 8, a.x, a.y + 8 + len);
+    fg.addColorStop(0, 'rgba(220,190,255,0.85)');
+    fg.addColorStop(1, 'rgba(120,80,255,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath();
+    ctx.moveTo(a.x - 4, a.y + 8);
+    ctx.lineTo(a.x + 4, a.y + 8);
+    ctx.lineTo(a.x, a.y + 8 + len);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(16,8,30,0.92)';
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, 11, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#c9b0ff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#f0e8ff';
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   /** 环绕机：发光小球 + 拖尾，挡弹时闪白 */
@@ -1007,6 +1387,18 @@ class Enemy {
     this.fromBottom = !!opt.fromBottom;   // 从屏幕底部升起（爬升阶段不参与撞机）
     // 登场无敌只覆盖"还没冒出屏幕边缘"那段，具体秒数按机型配（见 SPAWN_GUARD）
     this.spawnGuard = this.fromBottom ? (SPAWN_GUARD[this.kind] || 1.2) : 0;
+    // 偏折面：耐久按"还能拨几发"算，拨空后进入 down 秒的真实受击窗口。
+    // 不用"无限偏折"是有意的——正面锁死等于逼玩家绕后，那只是换皮的无敌怪。
+    this.deflectHp = def.deflect ? def.deflect.cap : 0;
+    this.deflectDown = 0;
+    this.dflash = 0;
+    // 冲角型小 BOSS：0 巡游 / 1 锁定 / 2 俯冲 / 3 归位
+    this.ramState = 0;
+    this.ramT = 0;
+    this.ramVX = 0;
+    this.ramVY = 0;
+    this.ramTX = 0;
+    this.ramTY = 0;
     this.centerX = opt.centerX === undefined ? VIEW.w / 2 : opt.centerX;
     this.sweep = opt.sweep === undefined ? 132 : opt.sweep;
     this.chargeState = 0;    // 0 常态 / 1 蓄力 / 2 冲刺 / 3 收尾
@@ -1020,6 +1412,16 @@ class Enemy {
     this.t += dt;
     if (this.flash > 0) this.flash -= dt;
     if (this.spawnGuard > 0) this.spawnGuard -= dt;
+    if (this.dflash > 0) this.dflash -= dt;
+    // 偏折面过载 → 计时结束自动充能。放在这里而不是判定里，
+    // 否则一帧多颗子弹会把同一个计时器反复清零。
+    if (this.deflectDown > 0) {
+      this.deflectDown -= dt;
+      if (this.deflectDown <= 0) {
+        this.deflectDown = 0;
+        this.deflectHp = this.def.deflect ? this.def.deflect.cap : 0;
+      }
+    }
 
     // 蛇的部件：位置由 game._updateSnake 沿路径统一写入，
     // 这里要跳过 AI 和"越界即销毁"——蛇贴边走，边距判断会误杀它
@@ -1091,6 +1493,18 @@ class Enemy {
         if (this.fireT <= 0 && this.y > PLAY_TOP && this.y < VIEW.h * 0.75) {
           this.fireT = this.def.fire;
           this.shoot(game, 'aim');
+        }
+        break;
+
+      /* 狙击机：慢速下降、几乎不摆，只在屏幕上半部打一发狙击弹。
+       * 比 shooter 更"稳"——它的威胁不在弹数，在你必须记住它在哪。 */
+      case 'sniper':
+        this.y += this.speed * dt;
+        this.x = this.baseX + Math.sin(this.t * 0.7 + this.phase) * 10;
+        this.fireT -= dt;
+        if (this.fireT <= 0 && this.y > PLAY_TOP + 24 && this.y < VIEW.h * 0.70) {
+          this.fireT = this.def.fire;
+          this.shoot(game, 'snipe');
         }
         break;
 
@@ -1265,7 +1679,12 @@ class Enemy {
 
       // 中型机：底部升到顶部后开始巡游 + 三向散射
       case 'miniboss':
-        if (this.y > 216) {
+        // 冲撞型的状态机必须放在最前面：俯冲会让 y 越过 216，
+        // 而下面那段 `y > 216` 是"还在从屏幕下方爬升"的判断，会把俯冲当成爬升拽回去，
+        // 表现为原地上下抖动、永远冲不下来。
+        if (this.def.mb === 'ram' && this.ramState !== 0) {
+          this._ramMove(dt);
+        } else if (this.y > 216) {
           // 掉头用 0.45 秒旋转过渡：原先到顶那一帧 π → 0 直接翻转，看着很生硬
           const TURN_DUR = 0.55;
           const turnY = 216 + 220 * TURN_DUR;
@@ -1291,9 +1710,9 @@ class Enemy {
           this.y = 216 + Math.sin(mt * 1.3) * 8;
           this.x = this.centerX + Math.sin(mt * 0.62) * this.sweep;
           this.fireT -= dt;
-          if (this.fireT <= 0) {
+          if (this.fireT <= 0 && p.alive) {
             this.fireT = this.def.fire;
-            this.shoot(game, 'fan5');
+            this._mbFire(game);
           }
         }
         break;
@@ -1324,6 +1743,15 @@ class Enemy {
         game.spawnEnemyBullet(bx + off, by, Math.cos(ang) * 250, Math.sin(ang) * 250);
       }
       SFX.enemyShoot();
+    } else if (mode === 'snipe') {
+      // 狙击弹：0.62 秒慢速滑行 + 沿发射方向猛加速。
+      // 初速只有 96，这段时间足够玩家看清准星环并横移——
+      // 它是"读招"型威胁，不是"反应不过来"型威胁。
+      const sy = this.y + this.r * 0.72;
+      game.spawnEnemyBullet(bx, sy, Math.cos(ang) * 96, Math.sin(ang) * 96, {
+        kind: 'enemyAlt', r: 7, life: 9, snipe: { delay: 0.62, speed: 720 }
+      });
+      SFX.snipeCharge();
     } else if (mode === 'fan3') {
       for (let i = -1; i <= 1; i++) {
         const a = ang + i * 0.30;
@@ -1344,6 +1772,68 @@ class Enemy {
         game.spawnEnemyBullet(bx, by, Math.cos(a) * 150, Math.sin(a) * 150, { kind: 'enemyAlt' });
       }
       SFX.enemyShoot();
+    }
+  }
+
+  /** 小 BOSS 的开火分派：升起 / 巡游 / 血条都共用宿主流程，差异只在这里 */
+  _mbFire(game) {
+    const mb = this.def.mb;
+    if (mb === 'sniper') { this.shoot(game, 'snipe'); return; }
+    if (mb === 'prism') {
+      // 棱镜：威胁来自"正面打不进去"，所以弹幕刻意做得很稀，只给慢速三向
+      this.shoot(game, 'fan3');
+      return;
+    }
+    if (mb === 'ram') {
+      this.shoot(game, 'fan3');
+      const p = game.player;
+      this.ramState = 1;
+      this.ramT = 0.7;
+      this.ramTX = p.x;
+      this.ramTY = p.y;
+      SFX.laserLock();
+      return;
+    }
+    this.shoot(game, 'fan5');
+  }
+
+  /** 冲角型小 BOSS 的机动：锁定 0.7s → 720px/s 俯冲 → 爬回原位。
+   *  俯冲速度刻意高于玩家横移（330）的两倍：它必须逼玩家提前预判，
+   *  而不是"看到冲下来再侧移"就能白躲。 */
+  _ramMove(dt) {
+    if (this.ramState === 1) {
+      this.ramT -= dt;
+      this.y -= 26 * dt;                 // 蓄势上抬，姿态上"退一步再撞"
+      if (this.ramT <= 0) {
+        const a = Math.atan2(this.ramTY - this.y, this.ramTX - this.x);
+        this.ramVX = Math.cos(a) * 720;
+        this.ramVY = Math.sin(a) * 720;
+        this.ramState = 2;
+        this.ramT = 1.3;
+        SFX.enemyShoot();
+      }
+      return;
+    }
+    if (this.ramState === 2) {
+      this.ramT -= dt;
+      this.x = clamp(this.x + this.ramVX * dt, 30, VIEW.w - 30);
+      this.y += this.ramVY * dt;
+      if (this.ramT <= 0 || this.y > VIEW.h - 46) {
+        this.ramState = 3;
+        this.ramVX = 0;
+        this.ramVY = 0;
+      }
+      return;
+    }
+    // 归位：300px/s 爬回去，比俯冲慢一截，留出"它要回来了"的反应时间
+    this.y -= 300 * dt;
+    this.x += (this.centerX - this.x) * Math.min(1, 4.0 * dt);
+    if (this.y <= 216) {
+      this.y = 216;
+      this.x = this.centerX;
+      this.ramState = 0;
+      this.arriveT = this.t;             // 巡游相位归零，正好接回中心
+      this.fireT = 2.2;
     }
   }
 
@@ -1425,11 +1915,99 @@ class Enemy {
       ctx.restore();
     }
 
+    // 偏折面：正面一段亮弧。
+    // 画成"贴着机身的弧"而不是整圈，玩家才能一眼看出"只有正下方打不动"。
+    const D = this.def.deflect;
+    if (D) {
+      const on = this.deflectHp > 0;
+      const k = on ? this.deflectHp / D.cap : 0;      // 1 → 0
+      // 半径取 r+9 而不是按贴图算：判定用的是 r + 弹半径(约4) + 6，
+      // 画在同一个量级上，玩家才不会出现"看着挡住了却被穿透"的落差
+      const rr = this.r + 9;
+      const a0 = D.aim - D.arc / 2, a1 = D.aim + D.arc / 2;
+      const hot = this.dflash > 0;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      if (on) {
+        // 玻璃面：弧 + 弦围成一个"透镜"（圆弧与其两端连线的弓形），
+        // 填实之后才像一块板；只描一条弧永远读成"一道白边"
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, rr, a0, a1);
+        ctx.closePath();
+        const g = ctx.createRadialGradient(this.x, this.y, rr * 0.35, this.x, this.y, rr);
+        g.addColorStop(0, 'rgba(120,220,255,0)');
+        g.addColorStop(0.6, 'rgba(130,225,255,' + (0.16 + k * 0.16).toFixed(2) + ')');
+        g.addColorStop(1, 'rgba(205,248,255,' + (0.42 + k * 0.34).toFixed(2) + ')');
+        ctx.fillStyle = g;
+        ctx.fill();
+
+        // 棱面：三条从弦向弧顶的短刻线，读作"这块板在折射"
+        ctx.strokeStyle = 'rgba(170,240,255,' + (0.22 + k * 0.26).toFixed(2) + ')';
+        ctx.lineWidth = 1;
+        for (let i = 1; i <= 3; i++) {
+          const a = a0 + (a1 - a0) * i / 4;
+          ctx.beginPath();
+          ctx.moveTo(this.x + Math.cos(a) * rr * 0.66, this.y + Math.sin(a) * rr * 0.66);
+          ctx.lineTo(this.x + Math.cos(a) * rr, this.y + Math.sin(a) * rr);
+          ctx.stroke();
+        }
+
+        // 外缘：挡下子弹时整条闪白
+        ctx.strokeStyle = hot ? '#ffffff'
+          : 'rgba(' + (k > 0.4 ? '170,240,255' : '255,200,120') + ',' + (0.60 + k * 0.40).toFixed(2) + ')';
+        ctx.lineWidth = hot ? 4.5 : 2.6;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, rr, a0, a1);
+        ctx.stroke();
+      } else {
+        // 过载：暗红的断弧，表示"这层刚被打穿，正在重新充能"
+        ctx.strokeStyle = 'rgba(255,110,110,' + (0.34 + Math.sin(this.t * 30) * 0.14).toFixed(2) + ')';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([7, 8]);
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, rr, a0, a1);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // 两端的小棱镜节点：让"这段弧是装备"这件事有实体感
+      if (on) {
+        for (const sgn of [-1, 1]) {
+          const a = D.aim + sgn * D.arc / 2;
+          ctx.fillStyle = hot ? '#ffffff' : 'rgba(210,250,255,0.95)';
+          ctx.beginPath();
+          ctx.arc(this.x + Math.cos(a) * rr, this.y + Math.sin(a) * rr, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    // 冲角锁定：一条从机头指向落点的红色预警线 + 收缩环，0.7 秒的读招窗口
+    if (this.ramState === 1) {
+      const k = 1 - this.ramT / 0.7;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = 'rgba(255,70,70,' + (0.35 + k * 0.5).toFixed(2) + ')';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([9, 8]);
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y + this.r * 0.6);
+      ctx.lineTo(this.ramTX, this.ramTY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(this.ramTX, this.ramTY, 34 - k * 22, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // 血条：坦型掉血后显示；精英和中型机常驻显示（多只同屏时要能分辨进度）
     // 阈值 35：3.3.0 血量上调后小机也有 5~16 血，全都画会糊成一片。
     // 只留给 bomber(52) / jelly(38) / shield(38) / heavy(155) 这类真需要看进度的单位，
     // eel(34) / mineH(34) 正好卡在下面。
-    const showBar = this.kind === 'miniboss'
+    const showBar = isMiniKind(this.kind)
       ? this.y > PLAY_TOP + 12
       : ((this.maxHp >= 35 || this.elite) && this.hp < this.maxHp && this.y > PLAY_TOP + 12);
     if (showBar) {

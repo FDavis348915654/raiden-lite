@@ -137,6 +137,19 @@ const SFX = {
     }
   },
 
+  /* 狙击弹的两段：蓄力是低频上滑（听着"在攒劲"），
+   * 出膛是一声高频撕裂 + 噪声，和普通 enemyShoot 明显不同。 */
+  snipeCharge() {
+    if (!this._gate('snipeC', 110)) return;
+    this._tone(170, 0.55, 'sawtooth', 0.05, 640);
+  },
+
+  snipeFire() {
+    if (!this._gate('snipeF', 55)) return;
+    this._noise(0.12, 0.20, 4200, 2.2);
+    this._tone(1250, 0.10, 'square', 0.10, 320);
+  },
+
   stageClear() {
     const notes = [523, 659, 784, 1047];
     notes.forEach((f, i) => this._tone(f, 0.22, 'triangle', 0.16, f, i * 0.11));

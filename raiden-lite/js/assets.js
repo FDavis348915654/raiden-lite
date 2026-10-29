@@ -73,6 +73,11 @@ const Assets = {
     this.bulletSprites.enemy = make(16, 16, '#fff2c4', 'rgba(255,140,60,0.85)');
     this.bulletSprites.enemyAlt = make(16, 16, '#f0d8ff', 'rgba(180,120,255,0.85)');
     this.bulletSprites.big = make(30, 30, '#ffffff', 'rgba(255,90,60,0.9)');
+    // 临时武器：追踪弹偏暖橙（和绿色导弹区分），宽头弹是横向拉宽的青绿光刃。
+    // 宽头弹的贴图必须"横着长"：它的作用是挡弹开路，视觉上要像一堵墙，
+    // 做成圆球会被误认成又一种普通子弹。
+    this.bulletSprites.track = make(22, 34, '#fff3dd', 'rgba(255,150,70,0.95)');
+    this.bulletSprites.wide = make(54, 18, '#eaffff', 'rgba(80,255,210,0.90)');
   },
 
   frame(name) {

@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.20.4';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.25.2';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -57,6 +57,20 @@ const SNAKE = {
     fireMul: 0.62,       // 发弹间隔倍率（越小越快）
     headFireMul: 0.62,   // 头部扇形间隔倍率
     headFan: 5           // 头部扇形从 3 发变 5 发
+  },
+
+  /* 双蛇（第 9 关压轴）：同一条环路上一正一反游走。
+   * 两条蛇各自吃满血条会变成"打不完的墙"，所以把总量按 1.5 条单蛇控制：
+   * 头 1250 × 2 = 2500（击杀门槛），节 160 × 7 是可选的"削弹幕"开销。
+   * 射速单条降 42%（0.15 → 0.26），两条合计 7.7 发/秒，只比原来单条 6.7 高一点；
+   * 头扇形 2.1 → 3.2 秒，让玩家有真正的穿行窗口，而不是被两股扇形夹死。 */
+  twin: {
+    segs: 7,
+    headHp: 1250,
+    segHp: 160,
+    fireGap: 0.26,
+    headFireGap: 3.2,
+    speed: 150
   }
 };
 
@@ -75,7 +89,10 @@ const PLAYER = {
   deathDelay: 1.5,          // 阵亡后停这么久再出结算页，留给爆炸和反应时间
   bombs: 5,                 // 初始保险（清屏炸弹）数量
   maxBombs: 10,             // 保险上限（清屏 + 2.4s 无敌，堆到 20 打起来没有取舍）
-  invuln: 1.6,              // 受击后无敌时间
+  /* 受击后无敌时间：1.6 → 2.8。
+   * 玩家挨枪那一刻往往还站在弹幕里，1.6 秒常常撑不到离开危险区就再次被判定，
+   * 手感上像"被同一条弹幕连吃两条命"。2.8 秒足够绕出包围，也不至于让失误无代价。 */
+  invuln: 2.8,
   bombInvuln: 2.4,          // 放保险后的无敌时间
 
   /* 普通保险：向前投掷高爆弹。按下瞬间只给无敌 + 音效，
@@ -88,11 +105,17 @@ const PLAYER = {
   bombBossDmg: 160,         // BOSS 轮廓被罩住时的固定伤害
   bombSnakeDmg: 180,        // 蛇头只吃这些，避免一颗雷直接删掉整条蛇
   bombCd: 0.9,              // 普通保险冷却（从按下算）：比 0.35s 引信长，连点不会在上一颗还在飞时又扔一颗
-  hitR: 9,                  // 判定半径（贴图宽 40，判定直径 18，接近弹幕游戏手感）
+  /* 判定半径：9 → 6（贴图宽 40，判定直径 12，只有机身的 30%）。
+   * 第一版只缩到 7.5，玩家在调试层里量不出区别（18px → 15px），
+   * 说明这个量级根本不足以改变手感——要"能擦过去"就得一次缩到位。
+   * 子弹判定同步收窄，两者一起缩才不会出现"看着擦过去了却算中"的落差。 */
+  hitR: 6,
   startPower: 1,
   maxPower: 3,
   maxOptions: 2,            // 僚机上限（沙罗曼蛇式 Option）
-  optionInvuln: 3.5,        // 僚机已满时再吃 O：短时无敌
+  /* 僚机已满时再吃僚机道具（O / 已在场的 A）的无敌时间：3.5 → 5.5。
+   * 冗余道具本来就是"没得选时的安慰奖"，给到 5.5 秒才真能当一次保命用。 */
+  optionInvuln: 5.5,
 
   /* 激光保险（第二种保险）：向上打一条持续光束
    * 蓄力 0.8s → 发射 6s，全程无敌，能清掉路径上的敌弹 */
@@ -144,6 +167,15 @@ const PLAYER = {
   rearDmgMul: 4.0
 };
 
+/* 敌方子弹的**判定**收缩系数（不影响贴图尺寸）。
+ * 子弹画多大是"看清弹幕形状"的需要，判定多大是"擦弹能不能过"的手感，
+ * 这两件事本来就该分开：图不变、判定缩到 0.72（小弹 r6 → 4.3），
+ * 玩家才敢从弹缝里穿。
+ * 统一在 spawnEnemyBullet 里乘一次，避免几十处调用点各改一遍还漏。
+ * BOSS 大弹（显式 r 10~14）同样受益，否则"大弹的判定比看起来大一圈"。
+ * 0.82 那版实测只差 1px，玩家在调试层里根本看不出来，所以直接压到 0.72。 */
+const ENEMY_BULLET_HIT_K = 0.72;
+
 /* ---------------- 武器表 ----------------
  * 4 种武器由道具 W 循环切换，火力等级 P 影响弹道数量与伤害
  * cd: 开火间隔（秒）
@@ -151,7 +183,7 @@ const PLAYER = {
 const WEAPONS = [
   { id: 'vulcan',  name: 'VULCAN',  cn: '火神炮',   color: '#7fe0ff', cd: 0.100, from: 1 },
   /* 散射炮：一次 15 发的霰弹，射速刻意放慢（0.28s），靠"一片弹丸"而不是"持续泼水" */
-  { id: 'spread',  name: 'SPREAD',  cn: '散射炮',   color: '#d8ff70', cd: 0.280, from: 1 },
+  { id: 'spread',  name: 'SPREAD',  cn: '散射炮',   color: '#d8ff70', cd: 0.340, from: 1 },
   { id: 'laser',   name: 'LASER',   cn: '穿透激光', color: '#ff6b9d', cd: 0.120, from: 2 },
   { id: 'missile', name: 'MISSILE', cn: '追踪导弹', color: '#8dff9e', cd: 0.360, from: 3 },
   /* --- 后期解锁 --- */
@@ -164,9 +196,11 @@ const WEAPONS = [
 ];
 
 /* 武器槽：吃到不同武器会占一个槽，多个槽同时开火
- * 第 2/3 槽伤害递减，避免叠满后一路碾压 */
-const WEAPON_SLOTS = 3;
-const SLOT_DMG = [1, 0.65, 0.5];
+ * 副槽伤害递减，避免叠满后一路碾压。4 槽总输出上限 = 1 + 0.65 + 0.5 + 0.4 = 2.55 倍，
+ * 第 4 槽给 0.40 是"再往下降就没人愿意为它花一个槽位"的临界：
+ * 一把 0.4 倍的散射炮，实际收益还不如保持 3 槽、把道具让给主武器升级。 */
+const WEAPON_SLOTS = 4;
+const SLOT_DMG = [1, 0.65, 0.5, 0.4];
 
 /* 散射炮射程（像素）：约 0.40 屏高，按"路径长度"算，不是垂直高度。
  * 它靠齐射铺开覆盖，不是靠打得远；射程拉满会和火神炮的持续压制撞定位，
@@ -175,66 +209,90 @@ const SLOT_DMG = [1, 0.65, 0.5];
 const SPREAD_RANGE = VIEW.h * 0.40;
 
 /* ---------------- 全弹发射（OVERDRIVE） ----------------
- * 武器满级后再吃到同一把武器时触发。参照雷电的满级火力手感：
- *  - 一圈向外散射，弹数远多于常规射击（常规一轮 3~7 发，这里 30~50 发）
+ * 武器满级后再吃到同一把武器时触发，**形状取当前主武器的**（切枪决定打哪一套）。
+ * 参照雷电的满级火力手感：
+ *  - 弹数远多于常规射击（常规一轮 3~7 发，这里 24~64 发）
  *  - 单发伤害是普通子弹的 3~4 倍，打在身上"明显更痛"
- *  - 分两层：外圈快、内圈慢，层间速度差 ≥ 35%，
- *    飞出去会拉开成内外两圈，玩家一眼能看出这发不一样（散射炮三层）
+ *  - 分 2~4 层：外圈快、内圈慢，层间速度差 ≥ 35%，
+ *    飞出去会拉开成几圈，玩家一眼能看出这发不一样
  *
- * 单发为什么敢给到 6~9：360° 摊开之后，真正能命中 BOSS 的只有朝向它的
- * 那一小片（约 1/6），实际结算伤害只有总弹数的零头。
+ * 每种武器都要有自己的"记忆点"，不能都是同一圈弹换个颜色：
+ *   火神炮 双层满环 / 散射炮 前向弹墙 / 激光 前向光矛 / 导弹 螺旋涡流
+ *   等离子 慢速大球 / 榴弹 抛射空爆 / 电弧 满环跳弹 / 逆火 前后对开 / 环射 三层铺满
+ * 差异化靠三样东西叠加：层几何（arc/aim）、弹体贴图（kind）、结算行为
+ * （pierce/homing/boom/chain/fuse）。
+ *
  * n=弹数 / sp=初速 / dmg=单发伤害 / r=弹体半径 / rot=整层起始角偏移
+ * arc=张角（默认 2π 整圈；小于整圈时两端都落在边界上，不会突然少一发）
+ * aim=扇面中心方向（默认 -π/2 正上方）
+ * kind=弹体贴图（跟常规射击同款，玩家靠颜色一眼认出是哪把枪）
+ *
+ * 单发为什么敢给到 6~10：命中面越窄的形态，能落到目标上的弹数越少
+ * （整圈只有约 1/6 朝向前方），总伤害按 180~300 控制，不至于一颗雷炸穿 BOSS。
  */
 const OVERDRIVE = {
   boostT: 2.6,        // 射速强化持续时间（秒）
   boostMul: 0.55,     // 期间冷却倍率：≈ 射速 ×1.82
   life: 1.5,          // 弹幕存活时间（够飞出屏幕，不会被中途掐断）
   shapes: {
-    // 火神炮：经典双层环，外快内慢、内圈弹体更粗
+    /* 火神炮：经典双层满环，外快内慢、内圈弹体更粗。
+     * 唯一保留"完整一圈"的常规武器形态——它是一切的基准，也是被包围时的保命符。 */
     vulcan: [
-      { n: 24, sp: 900, dmg: 7, r: 9 },
-      { n: 17, sp: 520, dmg: 6, r: 11, rot: 0.11 }
+      { n: 24, sp: 900, dmg: 7, r: 9, kind: 'player' },
+      { n: 17, sp: 520, dmg: 6, r: 11, rot: 0.11, kind: 'player' }
     ],
-    // 散射炮：三层，越靠内越慢、越密，像一记环形开屏
+    /* 散射炮：前向 150° 的三层弹墙，越外越快越宽、越内越慢越密。
+     * 和常规的 60° 齐射同一个脾气：不铺满全屏，只把正前方压死。 */
     spread: [
-      { n: 26, sp: 880, dmg: 6, r: 8 },
-      { n: 20, sp: 620, dmg: 5, r: 9, rot: 0.09 },
-      { n: 14, sp: 430, dmg: 4, r: 10, rot: 0.19 }
+      { n: 24, sp: 900, dmg: 6, r: 8, arc: 2.62, kind: 'spread' },
+      { n: 18, sp: 620, dmg: 5, r: 9, arc: 2.10, rot: 0.04, kind: 'spread' },
+      { n: 12, sp: 430, dmg: 4, r: 10, arc: 1.50, kind: 'spread' }
     ],
-    // 穿透激光：弹数少但一发穿一串，双环速度差拉大到 60%
+    /* 穿透激光：最窄的扇面（±55°）＋最快弹速＋穿透，三层叠成一束光矛。
+     * 弹数最少，但打出去是一条能穿串的直线，和满环形成最强对比。 */
     laser: [
-      { n: 12, sp: 900, dmg: 8, r: 9, kind: 'laser', pierce: true },
-      { n: 9, sp: 560, dmg: 6, r: 10, rot: 0.21, kind: 'laser', pierce: true }
+      { n: 10, sp: 1150, dmg: 9, r: 9, arc: 1.90, pierce: true, kind: 'laser' },
+      { n: 8, sp: 820, dmg: 8, r: 10, arc: 1.25, rot: 0.05, pierce: true, kind: 'laser' },
+      { n: 6, sp: 560, dmg: 7, r: 10, arc: 0.72, pierce: true, kind: 'laser' }
     ],
-    // 追踪导弹：外圈直飞、内圈慢速追踪，收尾时自己拐回来补刀
+    /* 追踪导弹：三圈错开的角度 + 逐层变慢变强的追踪，
+     * 飞出去是一支旋转的涡流，慢的那圈会拐回来补刀。 */
     missile: [
-      { n: 14, sp: 700, dmg: 6, r: 8, kind: 'missile' },
-      { n: 12, sp: 430, dmg: 6, r: 9, rot: 0.13, kind: 'missile', homing: 5.5 }
+      { n: 12, sp: 820, dmg: 6, r: 8, homing: 3.2, kind: 'missile' },
+      { n: 10, sp: 560, dmg: 6, r: 9, rot: 0.26, homing: 5.0, kind: 'missile' },
+      { n: 8, sp: 360, dmg: 7, r: 9, rot: 0.52, homing: 7.0, kind: 'missile' }
     ],
-    // 等离子炮：大弹 + 命中炸开，两层都带爆炸
+    /* 等离子炮：最少的层数、最慢的弹速、最大的弹体，每颗命中都炸开。
+     * 打出去像两颗行星炸开，靠范围和爆炸而不是弹数。 */
     plasma: [
-      { n: 16, sp: 720, dmg: 9, r: 12, kind: 'plasma', boom: { r: 50, dmg: 4 } },
-      { n: 12, sp: 440, dmg: 8, r: 13, rot: 0.15, kind: 'plasma', boom: { r: 44, dmg: 4 } }
+      { n: 14, sp: 700, dmg: 10, r: 13, boom: { r: 58, dmg: 5 }, kind: 'plasma' },
+      { n: 10, sp: 420, dmg: 9, r: 14, rot: 0.20, boom: { r: 50, dmg: 4 }, kind: 'plasma' }
     ],
-    // 散榴弹：命中即炸（不用引信，向后飞的那几发引信炸开方向会不对）
+    /* 散榴弹：前向扇面抛出去，**不撞也炸**——定时引信在敌阵上空开火。
+     * 两层的引信错开 0.22 秒，前一片破片还没散完第二片就到，
+     * 覆盖感是靠"延时"做出来的，不是靠弹数（所以只有 24 发）。 */
     flak: [
-      { n: 18, sp: 660, dmg: 7, r: 9, kind: 'flak', boom: { r: 46, dmg: 4 } },
-      { n: 14, sp: 420, dmg: 6, r: 10, rot: 0.16, kind: 'flak', boom: { r: 40, dmg: 3 } }
+      { n: 14, sp: 720, dmg: 6, r: 9, arc: 2.44, fuse: 0.50, kind: 'flak' },
+      { n: 10, sp: 500, dmg: 6, r: 10, arc: 1.70, rot: 0.05, fuse: 0.72, kind: 'flak' }
     ],
-    // 电弧炮：外圈跳 2 次、内圈跳 1 次
+    /* 电弧炮：满环 + 高跳数，一颗弹能顺着敌阵连 3 个 */
     tesla: [
-      { n: 18, sp: 800, dmg: 6, r: 8, kind: 'tesla', chain: 2 },
-      { n: 14, sp: 470, dmg: 6, r: 9, rot: 0.14, kind: 'tesla', chain: 1 }
+      { n: 18, sp: 820, dmg: 6, r: 8, chain: 3, kind: 'tesla' },
+      { n: 14, sp: 500, dmg: 6, r: 9, rot: 0.13, chain: 2, kind: 'tesla' }
     ],
-    // 逆火炮：整圈同伤害，前向压 BOSS、后向顺手清爬上来 / 掠过机尾的敌机
+    /* 逆火炮：**前后对开**，上下各两三层，左右两侧留空。
+     * 形状本身就是这把枪的性格：前面压 BOSS，后面顺手清爬上来 / 掠过机尾的敌机。 */
     backfire: [
-      { n: 20, sp: 860, dmg: 7, r: 9 },
-      { n: 16, sp: 500, dmg: 6, r: 10, rot: 0.16 }
+      { n: 16, sp: 900, dmg: 7, r: 9, arc: 2.20, kind: 'backfire' },
+      { n: 12, sp: 560, dmg: 6, r: 10, arc: 1.50, rot: 0.05, kind: 'backfire' },
+      { n: 10, sp: 700, dmg: 6, r: 8, arc: 1.60, aim: Math.PI / 2, kind: 'backfire' },
+      { n: 8, sp: 470, dmg: 6, r: 9, arc: 1.00, aim: Math.PI / 2, rot: 0.05, kind: 'backfire' }
     ],
-    // 环射炮：本来就是环形，全弹发射直接铺满内外两圈
+    /* 环射炮：本来就以"全方位"立命，全弹发射直接三层铺满，弹数全场第一（64 发） */
     omni: [
-      { n: 30, sp: 760, dmg: 6, r: 8 },
-      { n: 22, sp: 480, dmg: 5, r: 9, rot: 0.09 }
+      { n: 30, sp: 780, dmg: 6, r: 8, kind: 'omni' },
+      { n: 22, sp: 500, dmg: 5, r: 9, rot: 0.09, kind: 'omni' },
+      { n: 12, sp: 330, dmg: 5, r: 10, rot: 0.21, kind: 'omni' }
     ]
   }
 };
@@ -266,6 +324,51 @@ const ELITE_HP_MUL = 3.2;
  */
 const WAVE_TUNE = { timeScale: 0.80, gapScale: 0.68 };
 
+/* ---------------- 临时增益（吃到即生效，到时间自动消失） ----------------
+ * 和武器槽的根本区别：**不占槽位、不吃 SLOT_DMG、不跨关保留**。
+ * 定位是"短时改变打法"而不是"永久变强"——护盾让玩家敢往前压，
+ * 宽头弹让玩家敢贴着弹幕打，追踪弹补单体输出，临时僚机补交叉火力。
+ * 四者都带时限，所以不会把长期平衡拉偏，可以在关卡里放开掉。
+ */
+const TEMP = {
+  /* 护盾：机头前方一块椭圆光罩，只吃子弹不吃撞机。
+   * hp 按"颗"算而不是按伤害：子弹伤害 1~3 差异大，按伤害算会让
+   * 高伤弹幕（BOSS 散射）几发就碎，玩家根本看不出护盾存在过。 */
+  shield: {
+    dur: 30,        // 持续时间（秒）
+    hp: 30,         // 可挡子弹数
+    rx: 30,         // 判定椭圆半径（横向）
+    ry: 25,         // 判定椭圆半径（纵向）
+    /* 护盾中心相对机身的抬高。半椭圆的截口就画在中心高度上，
+     * 34 让截口离机头 14px：再高就像一块悬空的拱门，贴到机头又像顶了块牌子。 */
+    oy: 34
+  },
+  /* 高爆追踪弹：临时武器，自动开火，命中炸开。
+   * 追踪速率 5.2 rad/s 比导弹武器（5.5）略低：这是"额外火力"，不该比专门
+   * 玩追踪的导弹还灵，否则拿到它就没有换武器的理由。 */
+  track: {
+    dur: 14, cd: 0.62, dmg: 7, sp: 430, r: 13,
+    homing: 5.2, boomR: 38, boomDmg: 3
+  },
+  /* 宽头弹：巨弹，沿途吸掉敌方子弹。
+   * 射速 0.26s、单发只有 3 伤害——它的价值在"开路"，不在输出。 */
+  wide: {
+    dur: 14, cd: 0.26, dmg: 3, sp: 940, r: 17
+  },
+  /* 临时僚机：跟在机身正下方，主槽同款弹道、火力 0.6 倍 */
+  ally: {
+    dur: 20, mul: 0.6, powMax: 2, oy: 46
+  }
+};
+
+/* 临时增益的提示文案：吃到时弹一次（复用武器提示位），到期再报一次 */
+const TEMP_INFO = {
+  shield: { title: 'SHIELD',  sub: '护盾 · 30s · 挡前方子弹 30 发', color: '#9fe8ff' },
+  track:  { title: 'TRACKER', sub: '高爆追踪弹 · 14s（不占武器槽）', color: '#ffa060' },
+  wide:   { title: 'WIDE',    sub: '宽头弹 · 14s · 途经敌方子弹一并吞掉', color: '#7bffcf' },
+  ally:   { title: 'ALLY',    sub: '临时僚机 · 20s · 重复吃补无敌', color: '#c9b0ff' }
+};
+
 /* 掉落权重（累计区间） */
 const DROPS = [
   { kind: 'P', upto: 0.060 },   // 火力 +1
@@ -274,7 +377,13 @@ const DROPS = [
   { kind: 'H', upto: 0.145 },   // 生命 +1
   { kind: 'O', upto: 0.158 },   // 僚机 +1（稀有）
   { kind: 'R', upto: 0.180 },   // 环绕机 +1（稀有）
-  { kind: 'L', upto: 0.193 }    // 激光保险 +1（更稀有）
+  { kind: 'L', upto: 0.193 },   // 激光保险 +1（更稀有）
+  /* 临时增益：加起来只占 4 个百分点，比环绕机/激光雷还稀有。
+   * 它们的强度是"一整段战术优势"，常见的话会盖过武器成长这条主线。 */
+  { kind: 'S', upto: 0.203 },   // 护盾（30s）
+  { kind: 'T', upto: 0.213 },   // 高爆追踪弹（14s）
+  { kind: 'D', upto: 0.223 },   // 宽头弹（14s）
+  { kind: 'A', upto: 0.233 }    // 临时僚机（20s）
 ];
 
 const SCORE = { pickup: 50, bossKill: 5000, stageClear: 2000, bombKill: 60 };
@@ -337,6 +446,35 @@ const ENEMY_DEFS = {
   miniboss:  { sprite: 'e_heavy',     hp: 300, speed: 58,  score: 2400, r: 0.72, ai: 'miniboss',
                fire: 1.7, scale: 1.62 },
 
+  /* 棱镜机：正面一张偏折面，把玩家子弹**拨偏**而不是吃掉。
+   * 子弹始终是玩家的，被拨出去之后还能打到旁边的敌机——所以它的价值是
+   * "保护身后的编队"，不是自己无敌。偏折面按"能拨几发"算耐久：
+   * cap 14 发打空 → 过载 2.2 秒真实受击 → 自动充能。
+   * 这带来一个明确的取舍：单点持续射击是"钝刀割肉"，齐射是一刀破盾。
+   * arc 是护盾张角（±44°），从正下方斜着打进来（>44°）完全不吃偏折，
+   * 所以"绕到侧面打"这条路必须留着，否则就只是换了个皮的无敌怪。 */
+  deflect:   { sprite: 'e_mirror',    hp: 52,  speed: 50,  score: 640, r: 0.74, ai: 'straight',
+               scale: 1.25,
+               deflect: { aim: Math.PI / 2, arc: 1.54, cap: 14, down: 2.2, bend: 1.15 } },
+
+  /* 狙击机：细长机身，飞得慢、血不厚，但会打"慢起快收"的狙击弹。
+   * 发弹间隔 3.6 秒——它是气氛单位，不是弹幕单位。 */
+  sniper:    { sprite: 'e_torpedo',   hp: 26,  speed: 60,  score: 520, r: 0.66, ai: 'sniper',
+               fire: 3.6, scale: 1.22 },
+
+  /* --- 小 BOSS 变体：都是 ai:'miniboss'（同一条"升起 → 巡游"宿主流程），
+   * 差异在 mb 字段决定的开火/机动方式。这样不用复制三遍爬升与血条逻辑。 --- */
+  // 狙击手：巡游时每 5.6 秒打一发狙击弹（频率必须低，否则整屏都是加速弹）
+  mbSniper:  { sprite: 'e_torpedo',   hp: 380, speed: 58,  score: 2600, r: 0.72, ai: 'miniboss',
+               fire: 5.6, scale: 2.15, mb: 'sniper' },
+  // 棱镜：整块偏折面（±59°、26 发、过载 3.2 秒），正面硬顶，必须靠齐射破盾或绕后
+  mbPrism:   { sprite: 'e_shield',    hp: 520, speed: 56,  score: 2800, r: 0.74, ai: 'miniboss',
+               fire: 2.1, scale: 1.95, mb: 'prism',
+               deflect: { aim: Math.PI / 2, arc: 2.06, cap: 26, down: 3.2, bend: 1.05 } },
+  // 冲角：巡游 → 锁定（0.7s 红色预警线）→ 高速俯冲穿过玩家 → 爬回原位
+  mbRam:     { sprite: 'e_diver',     hp: 340, speed: 60,  score: 2600, r: 0.72, ai: 'miniboss',
+               fire: 4.8, scale: 1.98, mb: 'ram' },
+
   /* 蛇形小 BOSS 的部件：不走自己的 AI，位置由 game._updateSnake 沿路径写入。
    * 复用 Enemy 是为了白嫖碰撞、受击闪白、死亡结算；绘制由 game._drawSnake 统一画，
    * 所以这里的 sprite 只用来取一个尺寸基准，实际不绘制。 */
@@ -350,8 +488,15 @@ ENEMY_DEFS.splitling = {
   ai: 'miniboss', fire: 2.2, scale: 0.58
 };
 
+/* 小 BOSS 全家桶：因为 ai 全都是 'miniboss'（共用爬升/巡游/血条），
+ * 凡是"按机型判断是不是小 BOSS"的地方都必须走这个列表，否则新变体会被当成杂兵：
+ * 波次密度加成、车道分配、收尾段判定、击破补给。
+ * 这几个点踩一次就会出"3 只变 6 只""小 BOSS 死了却不算清空"之类的怪问题。 */
+const MINI_KINDS = ['miniboss', 'mbSniper', 'mbPrism', 'mbRam'];
+const isMiniKind = k => MINI_KINDS.indexOf(k) >= 0;
+
 /* 会从屏幕底部出现、需要提前警示的单位 */
-const BOTTOM_SPAWN = ['riser', 'miniboss'];
+const BOTTOM_SPAWN = ['riser', 'miniboss', 'mbSniper', 'mbPrism', 'mbRam'];
 
 /* 登场保护（秒）：只对从底部升起的单位生效，其余敌机出生即可打。
  * 作用仅仅是"别在还没冒出屏幕边缘时就白挨打"，所以只覆盖爬升那一段。
@@ -361,7 +506,10 @@ const BOTTOM_SPAWN = ['riser', 'miniboss'];
  */
 const SPAWN_GUARD = {
   riser: 1.15,      // 冒出底边 1.0 秒 + 0.15 秒缓冲
-  miniboss: 1.30   // 冒出底边 0.6 秒，多留 0.7 秒避免刚露头就被爆发掉
+  miniboss: 1.30,   // 冒出底边 0.6 秒，多留 0.7 秒避免刚露头就被爆发掉
+  mbSniper: 1.30,
+  mbPrism: 1.45,    // 棱镜血最厚，多给 0.15 秒避免刚露头就被齐射压穿护盾再打死
+  mbRam: 1.30
 };
 
 /* ---------------- 关卡 ----------------
@@ -452,7 +600,12 @@ const LEVELS = [
       { at: 40.8, kind: 'diver',     n: 6, form: 'pincer', speed: 95,  gap: 0.24 },
       { at: 12.6, kind: 'mineH',     n: 3, form: 'arc',    speed: 34,  gap: 0.55 },
       { at: 24.6, kind: 'looper',    n: 4, form: 'line',   speed: 112, gap: 0.45 },
-      { at: 30.0, kind: 'miniboss',  n: 2, form: 'line',   speed: 58,  gap: 0.5 },
+      // 狙击手首秀：两架从两侧压进来，悬在上面慢慢打"慢起快收"的狙击弹
+      { at: 19.6, kind: 'sniper',    n: 3, form: 'arc',    speed: 58,  gap: 0.7 },
+      // 棱镜机首秀：正面顶偏折面，藏在它上方的编队才是真目标
+      { at: 34.4, kind: 'deflect',   n: 2, form: 'line',   speed: 50,  gap: 0.6 },
+      { at: 30.0, kind: 'miniboss',  n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.28 },
+      { at: 30.4, kind: 'mbSniper',  n: 1, form: 'line',   speed: 56,  gap: 0.5, lane: 0.74 },
       { at: 21.0, kind: 'diver',    n: 5,  diag: 'ltr', gap: 0.14 },   // 对角：左下 → 右上
     ]
   },
@@ -489,7 +642,11 @@ const LEVELS = [
       { at: 40.0, kind: 'eel',     n: 5, form: 'diamond', speed: 92,  gap: 0.34 },
       { at: 8.4,  kind: 'riser',   n: 3, form: 'line',    speed: 130, gap: 0.55 },
       { at: 21.0, kind: 'riser',   n: 4, form: 'sides',   speed: 140, gap: 0.42 },
-      { at: 27.0, kind: 'miniboss', n: 2, form: 'line',    speed: 58,  gap: 0.5 }
+      // 棱镜开路 + 电鳗跟在后上方：正下方打不动，只能从侧翼或齐射破盾
+      { at: 12.2, kind: 'deflect',  n: 3, form: 'line',    speed: 48,  gap: 0.7 },
+      { at: 12.9, kind: 'eel',      n: 3, form: 'trail',   speed: 88,  gap: 0.34 },
+      { at: 27.0, kind: 'miniboss', n: 2, form: 'line',    speed: 58,  gap: 0.5 },
+      { at: 27.5, kind: 'mbPrism',  n: 1, form: 'line',    speed: 56,  gap: 0.5, lane: 0.5 }
     ]
   },
   {
@@ -523,8 +680,11 @@ const LEVELS = [
       { at: 32.2, kind: 'shield',    n: 3,  form: 'sides',  speed: 70,  gap: 0.6 },
       { at: 36.8, kind: 'drone',    n: 10, form: 'diamond', speed: 150, gap: 0.09 },
       { at: 41.2, kind: 'kamikaze', n: 6,  form: 'wave',    speed: 165, gap: 0.22 },
-      { at: 15.5, kind: 'miniboss', n: 3,  form: 'line',    speed: 58,  gap: 0.28, hp: 300 },
-      { at: 30.0, kind: 'looper',   n: 5,  form: 'vee',     speed: 118, gap: 0.32 }
+      { at: 15.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 300 },
+      { at: 16.0, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
+      { at: 30.0, kind: 'looper',   n: 5,  form: 'vee',     speed: 118, gap: 0.32 },
+      { at: 20.0, kind: 'sniper',   n: 3,  form: 'sides',   speed: 60,  gap: 0.75 },
+      { at: 34.0, kind: 'drone',    n: 10, form: 'grid',    speed: 150, gap: 0.10 }
     ]
   },
   {
@@ -561,7 +721,10 @@ const LEVELS = [
       { at: 42.0, kind: 'mirror', n: 7, form: 'diamond', speed: 100, gap: 0.20 },
       { at: 12.5, kind: 'looper',  n: 5, form: 'vee',     speed: 120, gap: 0.28 },
       { at: 27.0, kind: 'riser',   n: 4, form: 'line',    speed: 145, gap: 0.35 },
-      { at: 22.8, kind: 'miniboss', n: 2, form: 'line',   speed: 58,  gap: 0.5 }
+      { at: 18.0, kind: 'deflect', n: 3, form: 'line',    speed: 48,  gap: 0.6 },
+      { at: 25.0, kind: 'mirror',  n: 8, form: 'cross',   speed: 102, gap: 0.20 },
+      { at: 22.8, kind: 'miniboss', n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.26 },
+      { at: 23.2, kind: 'mbSniper', n: 1, form: 'line',   speed: 56,  gap: 0.5, lane: 0.74 }
     ]
   },
   {
@@ -595,7 +758,10 @@ const LEVELS = [
       { at: 33.0, kind: 'jelly',  n: 4,  form: 'line',    speed: 55,  gap: 0.65 },
       { at: 37.5, kind: 'drone',  n: 12, form: 'wave',    speed: 155, gap: 0.07 },
       { at: 42.0, kind: 'shield', n: 4,  form: 'arc',     speed: 70,  gap: 0.55 },
-      { at: 21.5, kind: 'miniboss', n: 3, form: 'line',   speed: 58,  gap: 0.28, hp: 280 },
+      { at: 21.5, kind: 'miniboss', n: 2, form: 'line',   speed: 58,  gap: 0.28, hp: 280 },
+      { at: 21.9, kind: 'mbPrism',  n: 1, form: 'line',   speed: 56,  gap: 0.28, lane: 0.5 },
+      { at: 26.2, kind: 'sniper',   n: 3, form: 'arc',    speed: 60,  gap: 0.7 },
+      { at: 30.5, kind: 'eel',      n: 6, form: 'cross',  speed: 98,  gap: 0.26 },
       { at: 22.0, kind: 'fighter',  n: 6,  diag: 'rtl', gap: 0.13 },   // 对角：右下 → 左上
     ]
   },
@@ -631,7 +797,11 @@ const LEVELS = [
       { at: 33.0, kind: 'flame',    n: 8,  form: 'vee',     speed: 105, gap: 0.22 },
       { at: 37.5, kind: 'kamikaze', n: 10, form: 'diamond', speed: 175, gap: 0.16 },
       { at: 42.0, kind: 'mirror',   n: 9,  form: 'wave',    speed: 110, gap: 0.18 },
-      { at: 17.5, kind: 'miniboss', n: 3, form: 'line',     speed: 58,  gap: 0.28, hp: 310 }
+      { at: 17.5, kind: 'miniboss', n: 2, form: 'line',     speed: 58,  gap: 0.28, hp: 310 },
+      { at: 17.9, kind: 'mbRam',    n: 1, form: 'line',     speed: 60,  gap: 0.28, lane: 0.5 },
+      { at: 27.0, kind: 'deflect',  n: 3, form: 'line',     speed: 48,  gap: 0.6 },
+      { at: 31.5, kind: 'kamikaze', n: 9, form: 'grid',     speed: 172, gap: 0.10 },
+      { at: 23.5, kind: 'sniper',   n: 3, form: 'sides',    speed: 62,  gap: 0.7 }
     ]
   },
   {
@@ -661,7 +831,10 @@ const LEVELS = [
       { at: 13.5, kind: 'mirror',   n: 7,  form: 'sides',   speed: 104, gap: 0.24 },
       { at: 17.5, kind: 'kamikaze', n: 9,  form: 'wave',    speed: 172, gap: 0.16 },
       { at: 21.5, kind: 'drone',    n: 12, form: 'diamond', speed: 158, gap: 0.07 },
-      { at: 25.5, kind: 'miniboss', n: 3,  form: 'line',    speed: 58,  gap: 0.28, hp: 320 },
+      { at: 25.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 320 },
+      { at: 25.9, kind: 'mbPrism',  n: 1,  form: 'line',    speed: 56,  gap: 0.28, lane: 0.5 },
+      { at: 22.5, kind: 'sniper',   n: 3,  form: 'sides',   speed: 62,  gap: 0.65 },
+      { at: 36.0, kind: 'flame',    n: 8,  form: 'trail',   speed: 106, gap: 0.16 },
       { at: 30.0, kind: 'flame',    n: 9,  form: 'pincer',  speed: 106, gap: 0.20 },
       { at: 34.5, kind: 'mirror',   n: 9,  form: 'diamond', speed: 108, gap: 0.18 },
       { at: 39.0, kind: 'kamikaze', n: 11, form: 'diamond', speed: 178, gap: 0.14 },
@@ -697,15 +870,18 @@ const LEVELS = [
       { at: 5.5,  kind: 'heavy',    n: 2,  form: 'line',    speed: 50,  gap: 1.0 },
       { at: 9.5,  kind: 'eel',      n: 6,  form: 'wave',    speed: 100, gap: 0.26 },
       { at: 13.5, kind: 'kamikaze', n: 8,  form: 'pincer',  speed: 175, gap: 0.18 },
-      { at: 17.5, kind: 'miniboss', n: 3,  form: 'line',    speed: 58,  gap: 0.28, hp: 340 },
+      { at: 17.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 340 },
+      { at: 17.9, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
       { at: 22.0, kind: 'mirror',   n: 9,  form: 'diamond', speed: 110, gap: 0.18 },
       { at: 26.5, kind: 'jelly',    n: 5,  form: 'arc',     speed: 54,  gap: 0.6 },
       { at: 31.0, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 54,  gap: 0.8 },
       { at: 35.5, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
       { at: 40.0, kind: 'drone',    n: 14, form: 'diamond', speed: 162, gap: 0.06 },
+      { at: 28.5, kind: 'deflect',  n: 3,  form: 'line',    speed: 48,  gap: 0.6 },
+      { at: 29.2, kind: 'sniper',   n: 3,  form: 'trail',   speed: 62,  gap: 0.6 },
 
-      // 第二轮小 BOSS：蛇形，在杂兵段之后压轴出场（头 1000 血 / 8 节 × 130）
-      { at: 43.5, kind: 'snake',    n: 1,  form: 'line' },
+      // 第二轮小 BOSS：双蛇对向游走（各 1250 头血 / 7 节 × 160，单条射速降 42%）
+      { at: 43.5, kind: 'snake',    n: 2,  form: 'line' },
       { at: 22.5, kind: 'torpedo',  n: 6,  diag: 'rtl', gap: 0.10 },   // 对角：右下 → 左上
     ]
   }

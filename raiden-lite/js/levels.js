@@ -8,7 +8,18 @@
  *  - 超过 7 架自动拆成后续小队，避免横排挤出屏幕
  */
 function spawnFormation(game, w) {
-  const mul = w.kind === 'miniboss' ? 1 : (game.level.density || 1);   // 中型机不吃密度加成
+  // 蛇：一次投放就是"一整条"，n 表示同时放几条（第 9 关放 2 条）。
+  // 不能走下面的 density 倍率——那会把 1 条加成 2 条，再乘 0.6 的补充波。
+  if (w.kind === 'snake') {
+    const cnt = Math.max(1, w.n || 1);
+    for (let i = 0; i < cnt; i++) {
+      game.queueEnemy({ kind: 'snake', twin: cnt > 1 }, VIEW.w / 2, -60, i * 1.1,
+        cnt === 1 ? 0.5 : i / cnt);
+    }
+    return;
+  }
+
+  const mul = isMiniKind(w.kind) ? 1 : (game.level.density || 1);   // 中型机不吃密度加成
   const total = Math.max(1, Math.round(w.n * mul));
   const gap = w.gap || 0.16;
   const baseY = -48;
@@ -106,10 +117,36 @@ function spawnFormation(game, w) {
         x = VIEW.w / 2 + side * (VIEW.w * 0.46 - rank * 30);
         y = baseY - rank * 44 - g * 26;
         delay = groupDelay + rank * gap;
+      } else if (w.form === 'grid') {
+        // 方阵：等宽等高的网格压下来。和 line 的区别是"两排以上"，
+        // 前排先到、后排错开半拍，玩家要横着扫过去而不是点掉一排
+        const cols = Math.min(5, Math.max(2, Math.ceil(Math.sqrt(count))));
+        const col = i % cols, row = Math.floor(i / cols);
+        const gw = Math.min(84, (VIEW.w - 100) / Math.max(1, cols - 1));
+        x = VIEW.w / 2 + (col - (cols - 1) / 2) * gw;
+        y = baseY - row * 58 - g * 26;
+        delay = groupDelay + row * gap * 1.6 + col * gap * 0.5;
+      } else if (w.form === 'cross') {
+        // 十字阵：中心 + 上下左右 + 四角，9 个点正好一架不浪费
+        const cr = [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0],
+                    [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7], [-0.7, -0.7]];
+        const q = cr[i % 9];
+        x = VIEW.w / 2 + q[0] * 104;
+        y = baseY - 54 + q[1] * 74 - g * 26;
+        delay = groupDelay + (Math.abs(q[0]) + Math.abs(q[1])) * gap * 0.8;
+      } else if (w.form === 'trail') {
+        // 斜列：一条越来越靠外侧的斜线，像雁群侧身掠过，和 line 的横排错开
+        const side = w.side === 'right' ? 1 : -1;
+        x = VIEW.w / 2 + side * (i - mid) * 34;
+        y = baseY - i * 30 - g * 26;
+        delay = groupDelay + i * gap;
       }
 
+      // lane：小 BOSS 专用的车道覆盖（0~1）。两个小 BOSS 波次挨着放时，
+      // 不给 lane 的话两者都是 slot 0.5，会叠在屏幕正中间变成一架。
       const slot = total === 1 ? 0.5 : Math.min(1, (i + g * perGroup) / (total - 1));
-      game.queueEnemy(w, clamp(x, 42, VIEW.w - 42), y, delay, slot);
+      game.queueEnemy(w, clamp(x, 42, VIEW.w - 42), y, delay,
+        w.lane !== undefined ? w.lane : slot);
       emitted++;
     }
   }

@@ -8,8 +8,13 @@ const BOMB_BTN = { x: VIEW.w - 34, y: VIEW.h - 28, r: 22 };
 const LASER_BTN = { x: VIEW.w - 92, y: VIEW.h - 28, r: 22 };
 // 声音开关：放在两个保险按钮上方，竖着排，避免和手指操作区抢位置
 const SOUND_BTN = { x: VIEW.w - 34, y: VIEW.h - 78, r: 18 };
+// HUD 武器槽：点击槽位即切换主武器（伤害 100% 的那格）。
+// 坐标只有这一份——绘制和点击热区共用，否则以后挪 HUD 必然错位。
+const SLOT_UI = { x: 18, y: 62, w: 74, h: 18, gap: 5 };
 // 通关页出现后锁定输入的秒数：最后一击常常是连点，不锁会直接跳过结算和致谢
 const WIN_INPUT_LOCK = 2.0;
+// 玩家受击的红晕时长：要盖过 0.46 秒震屏，玩家才能把"泛红"和"被击中"对上号
+const HURT_DUR = 0.7;
 
 const input = {
   left: false, right: false, up: false, down: false,
@@ -43,6 +48,7 @@ class Game {
     this.pickups = Array.from({ length: 32 }, () => new Pickup());
 
     this.queue = [];
+    this.snakes = [];                // 蛇形小 BOSS（数组：第 9 关双蛇，标题页也会读）
     this.waveIdx = 0;
     this.bgScroll = 0;
     this.stars = [];
@@ -55,6 +61,7 @@ class Game {
     this.bossActive = false;
     this.paused = false;
     this.flashT = 0;
+    this.hurtT = 0;                  // 玩家受击的红色边晕（与保险白闪分开）
     this.wpnToastT = 0;
     this.wpnTitle = '';
     this.wpnSub = '';
@@ -88,6 +95,7 @@ class Game {
     this.bombCdT = 0;         // 普通保险冷却剩余（秒）
     this.laserCdT = 0;        // 激光保险冷却剩余（秒）
     this.bombFx = null;       // 爆炸冲击环（0.5 秒后自动清空）
+    this.wpnSwapT = 0;        // 刚切过主武器：武器槽画一下重排闪动
     this.winT = 0;            // 通关页已停留时间（用于锁输入 + 提示渐显）
     // 声音总开关：持久化在 localStorage，进游戏前就生效（所以要在 SFX.init 之前读）
     this.soundOn = true;
@@ -270,7 +278,10 @@ class Game {
     const p = this.player;
     // 大致参照 DROPS 表的比例感（火力最常见、僚机最稀有），但每种都留了足够的出现率，
     // 方便单独测某一种道具（比如连着点几次就能试出僚机上限）
-    const pool = ['P', 'P', 'P', 'P', 'W', 'W', 'B', 'H', 'H', 'O', 'R', 'R', 'L'];
+    // 临时增益各放 2 个：它们的正确性（护盾挡弹、宽头弹吞弹、临时僚机开火）
+    // 必须能连着点两下就测到，不能指望掉落运气
+    const pool = ['P', 'P', 'P', 'P', 'W', 'W', 'B', 'H', 'H', 'O', 'R', 'R', 'L',
+      'S', 'S', 'T', 'T', 'D', 'D', 'A', 'A'];
     const n = randInt(3, 6);
     const y = Math.max(120, p.y - 84);
     // 标题页也能点补给，此时 this.level 还没建
@@ -345,6 +356,17 @@ class Game {
         }
       }
 
+      // HUD 武器槽：点哪一格就把哪把换到主位。必须在这里吃掉点击，
+      // 否则同一根手指会把飞机拽到 HUD 下沿（y 被 clamp 到 110，看着像"跳了一下"）
+      if (this.state === 'play' || this.state === 'boss' ||
+          this.state === 'warn' || this.state === 'clear') {
+        const s = this._weaponSlotAt(p.x, p.y);
+        if (s >= 0) {
+          this._pressSwitch(s);
+          return;
+        }
+      }
+
       // 失败页：还有续关机会就先续关，否则重开
       if (this.state === 'gameover') {
         if (this.contT > 0) this.continueRun();
@@ -401,6 +423,11 @@ class Game {
       if (!e.repeat) {
         if (k === 'x' || k === 'b') this._pressBomb();
         if (k === 'c' || k === 'v' || k === 'l') this._pressLaser();
+        // 切主武器：Q 循环下一把；数字键 1~N 直接选中第 N 格（N = WEAPON_SLOTS）
+        // 用数值比较而不是字符串比较，槽数涨到两位数也不会判断错
+        if (k === 'q') this._pressSwitch();
+        const slotN = Number(k);
+        if (k.length === 1 && slotN >= 1 && slotN <= WEAPON_SLOTS) this._pressSwitch(slotN - 1);
       }
       if (['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].indexOf(k) >= 0) e.preventDefault();
     });
@@ -452,6 +479,43 @@ class Game {
     else this._devToast('激光保险已用完');
   }
 
+  /** HUD 武器槽命中判定：返回槽号，-1 表示没点中。
+   *  热区比视觉框上下各高 9px —— 18px 高的胶囊用指腹点太考验人。 */
+  _weaponSlotAt(x, y) {
+    if (y < SLOT_UI.y - 9 || y > SLOT_UI.y + SLOT_UI.h + 9) return -1;
+    for (let i = 0; i < WEAPON_SLOTS; i++) {
+      const bx = SLOT_UI.x + i * (SLOT_UI.w + SLOT_UI.gap);
+      if (x >= bx - 3 && x <= bx + SLOT_UI.w + 3) return i;
+    }
+    return -1;
+  }
+
+  /** 切主武器：HUD 点槽 / 数字键传槽号（**选中该槽**），Q 不传（依次循环）。
+   *  槽号语义必须是"选中"而不是"轮转一格"：按 3 就该让第 3 格当主武器，
+   *  用户按数字键的预期是"跳到那一格"，不是"往前走一格"。
+   *  slot === 0 只闪一下不动顺序 —— 已经在主位，点了要有反应但不能真换。 */
+  _pressSwitch(slot) {
+    const p = this.player;
+    if (!p.alive || this.paused) return;
+    if (this.state !== 'play' && this.state !== 'boss' &&
+        this.state !== 'warn' && this.state !== 'clear') return;
+    if (slot === undefined) {          // Q：循环下一把
+      p.switchWeapon(this);
+      return;
+    }
+    // 越界槽号直接忽略：switchWeapon 里非法 slot 会回落成"切下一把"，
+    // 数字键 5 在四槽时按下去会莫名其妙换主武器，看起来像误触
+    if (slot < 0 || slot >= p.weapons.length) {
+      this._devToast('该槽位为空');       // 点了空格子必须有反馈，否则像按键失灵
+      return;
+    }
+    if (slot === 0) {
+      this.wpnSwapT = 0.45;            // 已是主武器：只给一次闪动确认收到输入
+      return;
+    }
+    p.switchWeapon(this, slot);
+  }
+
   togglePause() {
     if (this.state !== 'play' && this.state !== 'boss') return;
     this.paused = !this.paused;
@@ -477,17 +541,19 @@ class Game {
     const gs = WAVE_TUNE.gapScale;
     const altForm = {
       line: 'vee', vee: 'arc', column: 'sides', sides: 'line', arc: 'wave',
-      diamond: 'pincer', wave: 'diamond', pincer: 'arc'
+      diamond: 'pincer', wave: 'diamond', pincer: 'arc',
+      grid: 'trail', cross: 'pincer', trail: 'line'
     };
     const arr = [];
     this.level.waves.forEach(w => {
       const gap = (w.gap || 0.16) * gs;
       arr.push({
         kind: w.kind, n: w.n, form: w.form, hp: w.hp, speed: w.speed,
-        at: w.at * ts, gap: gap, side: w.side, arc: w.arc, diag: w.diag
+        at: w.at * ts, gap: gap, side: w.side, arc: w.arc, diag: w.diag,
+        lane: w.lane          // 小 BOSS 车道覆盖：漏了它两只小 BOSS 会叠在正中
       });
       // 中型机 / 蛇不吃补充波：否则 1 只会被自动加成 3 只，数量不可控
-      if (w.kind !== 'miniboss' && w.kind !== 'snake') {
+      if (!isMiniKind(w.kind) && w.kind !== 'snake') {
         arr.push({
           kind: w.kind,
           n: Math.max(2, Math.round(w.n * 0.6)),
@@ -508,7 +574,7 @@ class Game {
     // 本关最后一轮小 BOSS 的时间点。只有过了这个点，"小 BOSS 清空"才算数——
     // 否则第 9 关第一轮 3 架一打完就记 miniGoneT，收尾段会在蛇出场前就白跑一遍。
     this.lastMiniAt = arr.reduce((m, w) =>
-      (w.kind === 'miniboss' || w.kind === 'snake') ? Math.max(m, w.at) : m, 0);
+      (isMiniKind(w.kind) || w.kind === 'snake') ? Math.max(m, w.at) : m, 0);
     this.stageT = 0;
     this.waveIdx = 0;
     this.queue.length = 0;
@@ -527,11 +593,12 @@ class Game {
     this.outroStartT = undefined;   // 收尾段起算时刻（波次放完后才起算）
     this.outroNextT = 0;
     this.outroPool = null;          // 机型/阵型池，惰性构建
-    this.snake = null;              // 蛇形小 BOSS 的控制器
+    this._clearSnake();             // 蛇形小 BOSS 控制器（第 9 关同时有两条）
 
     this.bossActive = false;
     this.paused = false;
     this.flashT = 0;
+    this.hurtT = 0;                  // 玩家受击的红色边晕（与保险白闪分开）
     this.wpnToastT = 0;
     this.wpnTitle = '';
     this.wpnSub = '';
@@ -792,6 +859,7 @@ class Game {
     }
     if (this.bombCdT > 0) this.bombCdT = Math.max(0, this.bombCdT - dt);
     if (this.laserCdT > 0) this.laserCdT = Math.max(0, this.laserCdT - dt);
+    if (this.wpnSwapT > 0) this.wpnSwapT = Math.max(0, this.wpnSwapT - dt);
   }
 
   /** 炸弹飞行：抛物线上升 → 到点引爆 */
@@ -1119,17 +1187,22 @@ class Game {
     SFX.warn();
   }
 
-  onWeaponChanged() {
-    this.wpnTitle = WEAPONS[this.player.weapon].name;
-    this.wpnSub = WEAPONS[this.player.weapon].cn + ' · Lv' + this.player.power;
-    this.wpnColor = WEAPONS[this.player.weapon].color;
-    this.wpnToastT = 1.5;
+  /** 切换主武器（点 HUD 武器槽 / 按 Q / 数字键） */
+  onWeaponChanged(p, from) {
+    const w = WEAPONS[p.weapons[0]];
+    this.wpnTitle = w.name;
+    this.wpnSub = w.cn + ' · 主武器（伤害 100%）' + (from ? ' ← 槽 ' + (from + 1) : '');
+    this.wpnColor = w.color;
+    this.wpnToastT = 1.4;
+    this.wpnSwapT = 0.45;            // 槽位重排的一下闪动，提示"顺序变了"
+    SFX.weaponSwitch();
   }
 
   /** 占用一个空槽：多出一种同时开火的武器 */
   onWeaponAdded(p, idx) {
     this.wpnTitle = WEAPONS[idx].name;
-    this.wpnSub = WEAPONS[idx].cn + ' · 槽位 ' + p.weapons.length + '/' + WEAPON_SLOTS;
+    this.wpnSub = WEAPONS[idx].cn + ' · 槽位 ' + p.weapons.length + '/' + WEAPON_SLOTS +
+      (p.weapons.length > 1 ? ' · 点武器槽换主武器' : '');
     this.wpnColor = WEAPONS[idx].color;
     this.wpnToastT = 1.8;
     SFX.weaponSwitch();
@@ -1138,7 +1211,7 @@ class Game {
   /** 槽位已满：挤掉最旧的副武器 */
   onWeaponReplaced(p, out, idx) {
     this.wpnTitle = WEAPONS[idx].name;
-    this.wpnSub = '替换 ' + WEAPONS[out].name + ' · 槽位已满';
+    this.wpnSub = '替换 ' + WEAPONS[out].name + ' · 点武器槽可换主武器';
     this.wpnColor = WEAPONS[idx].color;
     this.wpnToastT = 1.8;
     SFX.weaponSwitch();
@@ -1150,6 +1223,30 @@ class Game {
     this.wpnSub = '已装备 · 满级后再吃触发全弹发射';
     this.wpnColor = WEAPONS[idx].color;
     this.wpnToastT = 1.4;
+  }
+
+  /** 吃到临时增益：复用武器提示位弹一次，玩家得知道"吃到了什么、能撑多久" */
+  onTempGain(p, id) {
+    const info = TEMP_INFO[id];
+    this.wpnTitle = info.title;
+    this.wpnSub = info.sub;
+    this.wpnColor = info.color;
+    this.wpnToastT = 1.8;
+    SFX.weaponSwitch();
+    this.flashT = Math.max(this.flashT, 0.10);
+    // 吃到的那一刻在机身周围放一圈同色粒子，和"武器槽 +1"区分开
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2;
+      this.addParticle(p.x, p.y, {
+        vx: Math.cos(a) * 200, vy: Math.sin(a) * 200,
+        life: 0.38, r: 3, color: info.color
+      });
+    }
+  }
+
+  /** 临时增益到期：只报一句，不打断战斗 */
+  onTempEnd(p, id) {
+    this._devToast(TEMP_INFO[id].title + ' 已结束');
   }
 
   onOptionGained(p) {
@@ -1240,13 +1337,16 @@ class Game {
     // 蛇身被剪掉：必须从控制器里摘掉。
     // 这些节是池子里的普通 Enemy，不摘的话会被 _spawnEnemy 复用成别的敌机，
     // controller 还拿着引用 → 会把"别人"当成自己的第 N 节，位置和血量全乱。
-    if (e.kind === 'snakeBody' && this.snake) {
-      const i = this.snake.segs.indexOf(e);
-      if (i >= 0) this.snake.segs.splice(i, 1);
+    // 双蛇同屏时不知道是哪条，所以要逐条找。
+    if (e.kind === 'snakeBody') {
+      for (const s of this.snakes) {
+        const i = s.segs.indexOf(e);
+        if (i >= 0) { s.segs.splice(i, 1); break; }
+      }
     }
 
     // 小 BOSS 击破 = 一个明确的"喘息点"：按关卡 supply 表里 ev:'miniboss' 的条目补一份道具
-    if (e.kind === 'miniboss') this._fireSupplyEvent('miniboss');
+    if (isMiniKind(e.kind)) this._fireSupplyEvent('miniboss');
 
     // 3.3.0 血量上调后阈值同步提高：否则连 fighter(11) 都算“大爆”，满屏震屏
     const big = e.maxHp >= 35 || e.elite;
@@ -1301,6 +1401,7 @@ class Game {
       boom: opt.boom,
       fuse: opt.fuse,
       chain: opt.chain,
+      wideBlock: opt.wideBlock,   // 宽头弹：漏了这个字段，它会变成一颗普通大弹，吞不了敌弹
       life: opt.life || 2.2
     });
   }
@@ -1328,9 +1429,14 @@ class Game {
     b.init(x, y, vx, vy, {
       friendly: false,
       kind: opt.kind || 'enemy',
-      r: opt.r || 6,
+      // 判定半径统一按 ENEMY_BULLET_HIT_K 收缩，贴图尺寸不动（见 config.js 注释）。
+      // 下限 3.5 是为了不让最小的弹变成"完全打不中"。
+      r: Math.max(3.5, (opt.r || 6) * ENEMY_BULLET_HIT_K),
       ay: opt.ay || 0,
-      life: 7
+      // 狙击弹必须显式透传：不透传的话它会退化成一颗普通慢弹，
+      // 永远不加速——和 wideBlock 那次是同一类静默失效
+      snipe: opt.snipe,
+      life: opt.life || 7
     });
   }
 
@@ -1345,7 +1451,8 @@ class Game {
       slot: slot === undefined ? 0.5 : slot,   // 在编队中的位置比例 0~1
       side: wave.side,                         // 'left' / 'right'：从侧面入场
       arc: wave.arc,                           // true：侧下方 → 侧上方的弧线掠袭
-      diag: wave.diag                          // 'ltr' / 'rtl'：对角穿越
+      diag: wave.diag,                         // 'ltr' / 'rtl'：对角穿越
+      twin: wave.twin                          // 蛇：两条对向游走
     });
   }
 
@@ -1408,9 +1515,18 @@ class Game {
     if (p) p.init(x, y, opt);
   }
 
-  shake(amp) {
+  /* 震屏：dur 可调。玩家受击要"更长更重"（0.46 秒），爆炸类保持默认 0.32 秒，
+   * 否则一整关的击破震屏都拖长，屏幕会一直在抖。 */
+  shake(amp, dur) {
     this.shakeAmp = Math.max(this.shakeAmp, amp);
-    this.shakeT = 0.32;
+    this.shakeT = Math.max(this.shakeT, dur || 0.32);
+  }
+
+  /* 玩家被击中：屏幕四周压一层红晕 + 一次短红闪。
+   * 光靠震屏在密集弹幕里很容易被忽略（击破敌机也在震），
+   * "全屏泛红"是唯一不会和击破反馈混淆的信号。 */
+  onPlayerHurt() {
+    this.hurtT = HURT_DUR;
   }
 
   explode(x, y, scale, color, count) {
@@ -1441,6 +1557,7 @@ class Game {
       if (this.shakeT <= 0) this.shakeAmp = 0;
     }
     if (this.flashT > 0) this.flashT -= dt;
+    if (this.hurtT > 0) this.hurtT -= dt;
     if (this.wpnToastT > 0) this.wpnToastT -= dt;
     if (this.overT > 0) this.overT -= dt;
     if (this.optToastT > 0) this.optToastT -= dt;
@@ -1646,9 +1763,9 @@ class Game {
     if (this.stageT < (this.lastMiniAt || 0)) return;
 
     const alive = this.enemies.some(e =>
-      e.active && (e.kind === 'miniboss' || e.kind === 'snakeHead'));
+      e.active && (isMiniKind(e.kind) || e.kind === 'snakeHead'));
     // 队列里还有没出生的小 BOSS 也算"没清空"：三架是隔 0.28 秒依次入场的
-    const queued = this.queue.some(q => q.kind === 'miniboss' || q.kind === 'snake');
+    const queued = this.queue.some(q => isMiniKind(q.kind) || q.kind === 'snake');
     if (alive || queued) {
       this.miniSeen = true;
       return;
@@ -1708,7 +1825,7 @@ class Game {
   _outroPool() {
     if (this.outroPool) return this.outroPool;
     // 排除：小 BOSS 本身、从底部升起的单位、漂雷（这几类不成编队）
-    const skip = ['miniboss', 'snake', 'riser', 'looper', 'mine', 'mineH'];
+    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH'].concat(MINI_KINDS);
     const kinds = [];
     const forms = [];
     for (const w of this.level.waves) {
@@ -1742,7 +1859,7 @@ class Game {
 
   _spawnEnemy(q) {
     // 蛇不是"一个敌人"，而是一串由控制器驱动的部件
-    if (q.kind === 'snake') { this.spawnSnake(); return; }
+    if (q.kind === 'snake') { this.spawnSnake(q.slot, q.twin); return; }
 
     const e = this.enemies.find(o => !o.active);
     if (!e) return;
@@ -1755,7 +1872,7 @@ class Game {
     const y = fromBottom ? VIEW.h + 130 : q.y;
 
     // 中型机：按编队位置分到 0.24W ~ 0.76W 的车道，否则三架会一起飞到屏幕中心叠成一架
-    const isMini = q.kind === 'miniboss';
+    const isMini = isMiniKind(q.kind);
     const laneX = VIEW.w * (0.24 + (q.slot === undefined ? 0.5 : q.slot) * 0.52);
 
     // 警示标记也按车道放，不然三个红柱会叠在同一处
@@ -1881,51 +1998,80 @@ class Game {
    * 所以玩家要在"剪发弹点"和"啃头"之间做选择。
    */
 
-  spawnSnake() {
-    if (this.snake) this._clearSnake();
+  /** 生成一条（或一对）蛇。
+   *  slot 决定双蛇里是哪条：<0.5 走顺时针、>=0.5 走逆时针，两条沿同一条环路对向游走。
+   *  对向而不是同向，是为了让它们"迎面擦过"——同向会永远保持固定间距，
+   *  看起来像一条被切开的蛇，对向才有两条各自为战的压迫感。 */
+  spawnSnake(slot, twin) {
+    const C = twin ? Object.assign({}, SNAKE, SNAKE.twin) : SNAKE;
+    const segsN = C.segs;
+    const dir = twin && slot >= 0.5 ? -1 : 1;
+
     const head = this.enemies.find(o => !o.active);
     if (!head) return;
 
-    head.init('snakeHead', VIEW.w / 2, -60, { hp: SNAKE.headHp });
+    head.init('snakeHead', VIEW.w / 2, -60, { hp: C.headHp });
     head.ai = 'snake';
     head.snakeLink = true;
     head.r = SNAKE.headR;
     head.spawnGuard = SNAKE.spawnGuard;
 
     const segs = [];
-    for (let i = 0; i < SNAKE.segs; i++) {
+    for (let i = 0; i < segsN; i++) {
       const e = this.enemies.find(o => !o.active);
       if (!e) break;
-      e.init('snakeBody', VIEW.w / 2, -60, { hp: SNAKE.segHp });
+      e.init('snakeBody', VIEW.w / 2, -60, { hp: C.segHp });
       e.ai = 'snake';
       e.snakeLink = true;
       e.segIdx = i;
-      const k = SNAKE.segs > 1 ? i / (SNAKE.segs - 1) : 0;
+      const k = segsN > 1 ? i / (segsN - 1) : 0;
       e.r = SNAKE.segR0 + (SNAKE.segR1 - SNAKE.segR0) * k;   // 越靠尾巴越细
       e.off = (i + 1) * SNAKE.spacing;    // 沿路径的弧长偏移，断节后会重新收敛
       e.spawnGuard = SNAKE.spawnGuard;
       segs.push(e);
     }
 
-    this.snake = {
+    // 双蛇的第二条走内圈：两条环路各占一条"车道"，迎面交错时才不会糊成一条
+    const inset = (twin && dir < 0) ? {
+      x: SNAKE.inset.x + 24,
+      top: SNAKE.inset.top + 12,
+      bottom: SNAKE.inset.bottom + 12,
+      radius: SNAKE.inset.radius
+    } : null;
+    const path = this._snakePath(inset);
+    // 双蛇错开半圈起步，否则两条会从同一个点叠着出场
+    const startDist = twin ? (dir > 0 ? 0 : path.total * 0.5) : 0;
+
+    this.snakes.push({
       head, segs,
       total: segs.length,      // 初始节数，暴走判定用（segs 会被 splice 缩短）
-      path: this._snakePath(),
-      dist: 0,
+      path,
+      dir,
+      dist: startDist,
+      speed: C.speed,
+      fireGap: C.fireGap,
+      headFireGap: C.headFireGap,
       spawnT: 0,
       fireT: 0.9,
       fireIdx: 0,
       headFireT: 2.2,
       rage: false,        // 暴走：掉够节数或头血量过半后触发
       rageFlash: 0
-    };
-    this._bigToast('SERPENT', '蛇形单位 · 打掉头才算击杀', '#c9a6ff');
-    SFX.warn();
+    });
+    // 双蛇是先后 1.1 秒入场的，只让第一条报幕，否则第二次会盖掉第一次
+    if (!this.snakes.length) {
+      this._bigToast(twin ? 'TWIN SERPENT' : 'SERPENT',
+        twin ? '双蛇 · 打掉两个头才算清场' : '蛇形单位 · 打掉头才算击杀',
+        '#c9a6ff');
+      SFX.warn();
+    }
   }
 
-  /** 沿屏幕四周的圆角矩形环路采样成点列，并累计弧长 */
-  _snakePath() {
-    const P = SNAKE.inset;
+  /** 沿屏幕四周的圆角矩形环路采样成点列，并累计弧长。
+   *  inset 可选：双蛇里第二条走一圈略小（内缩）的环路，
+   *  否则两条会沿同一条边擦身而过，看起来像一条被劈开的蛇。 */
+  _snakePath(inset) {
+    const P = inset || SNAKE.inset;
     const l = P.x, r = VIEW.w - P.x;
     const t = P.top, b = VIEW.h - P.bottom, rad = P.radius;
     const pts = [];
@@ -1977,10 +2123,15 @@ class Game {
   }
 
   _updateSnake(dt) {
-    const s = this.snake;
-    if (!s) return;
-    if (!s.head.active) { this._clearSnake(); return; }
+    if (!this.snakes.length) return;
+    for (let i = this.snakes.length - 1; i >= 0; i--) {
+      const s = this.snakes[i];
+      if (!s.head.active) { this.snakes.splice(i, 1); continue; }
+      this._updateOneSnake(dt, s);
+    }
+  }
 
+  _updateOneSnake(dt, s) {
     s.spawnT += dt;
 
     // 暴走判定：被剪掉足够多身体，或头血量过半 → 提速 + 加射速。
@@ -1997,10 +2148,11 @@ class Game {
     }
     if (s.rageFlash > 0) s.rageFlash -= dt;
 
-    s.dist += SNAKE.speed * (s.rage ? SNAKE.rage.speedMul : 1) * dt;
+    s.dist += s.speed * (s.rage ? SNAKE.rage.speedMul : 1) * s.dir * dt;
 
     const hp = this._snakeAt(s.path, s.dist);
-    const ahead = this._snakeAt(s.path, s.dist + 8);
+    // 朝向要沿 dir 取前方一点：逆时针游走时 +8 是"身后"，机头会翻过来
+    const ahead = this._snakeAt(s.path, s.dist + 8 * s.dir);
     s.head.x = hp.x;
     s.head.y = hp.y;
     // 菱形头的"前"是 -y，所以要 +90°
@@ -2016,7 +2168,7 @@ class Game {
       const target = rank * SNAKE.spacing;
       if (e.off === undefined) e.off = target;
       e.off += (target - e.off) * k;
-      const q = this._snakeAt(s.path, s.dist - e.off);
+      const q = this._snakeAt(s.path, s.dist - e.off * s.dir);
       e.x = q.x;
       e.y = q.y;
     }
@@ -2032,7 +2184,7 @@ class Game {
     // 关节轮流发：9 个点齐射会糊屏，轮流才有"一串弹从蛇身上甩出来"的感觉
     s.fireT -= dt;
     if (s.fireT <= 0) {
-      s.fireT = SNAKE.fireGap * (hot ? R.fireMul : 1);
+      s.fireT = s.fireGap * (hot ? R.fireMul : 1);
       const alive = s.segs.filter(e => e.active);
       if (alive.length) {
         const e = alive[s.fireIdx % alive.length];
@@ -2047,7 +2199,7 @@ class Game {
     // 头部扇形：暴走时 3 发变 5 发、间隔也缩短
     s.headFireT -= dt;
     if (s.headFireT <= 0) {
-      s.headFireT = SNAKE.headFireGap * (hot ? R.headFireMul : 1);
+      s.headFireT = s.headFireGap * (hot ? R.headFireMul : 1);
       const h = s.head;
       const base = Math.atan2(p.y - h.y, p.x - h.x);
       const n = hot ? R.headFan : 3;
@@ -2060,9 +2212,14 @@ class Game {
     }
   }
 
-  /** 蛇头被打爆：整条从头到尾依次崩解 */
+  /** 蛇头被打爆：整条从头到尾依次崩解。
+   *  双蛇同屏时必须按 head 引用找到属于它的那条控制器，不能拿 this.snakes[0]。 */
   killSnake(head) {
-    const s = this.snake;
+    let at = -1;
+    for (let i = 0; i < this.snakes.length; i++) {
+      if (this.snakes[i].head === head) { at = i; break; }
+    }
+    const s = at >= 0 ? this.snakes[at] : null;
     const segs = s ? s.segs : [];
     const stageIdx = this.levelIdx;
 
@@ -2077,7 +2234,7 @@ class Game {
         SFX.explode(false);
       }, (i + 1) * 70);
     }
-    this.snake = null;
+    if (at >= 0) this.snakes.splice(at, 1);
 
     this.explode(head.x, head.y, 2.1, '#e6d6ff', 36);
     this.flashT = Math.max(this.flashT, 0.24);
@@ -2091,27 +2248,32 @@ class Game {
   }
 
   _clearSnake() {
-    const s = this.snake;
-    if (s) {
+    for (const s of this.snakes) {
       s.head.active = false;
       for (const e of s.segs) e.active = false;
     }
-    this.snake = null;
+    this.snakes.length = 0;
   }
 
   _drawSnake(ctx) {
-    const s = this.snake;
+    for (const s of this.snakes) this._drawOneSnake(ctx, s);
+  }
+
+  _drawOneSnake(ctx, s) {
     if (!s || !s.head.active) return;
     const head = s.head;
     const fade = Math.min(1, s.spawnT / 0.7);
     const chain = [head].concat(s.segs);
 
-    // 暴走后整条换成紫红配色，并让外发光呼吸得更快——玩家一眼能看出"它怒了"
+    // 暴走后整条换成紫红配色，并让外发光呼吸得更快——玩家一眼能看出"它怒了"。
+    // 双蛇的第二条（dir<0）常态走蓝色系：两条在环路上擦身时，颜色是唯一能
+    // 立刻分清"哪截身体属于哪条蛇"的线索，光靠 24px 的错位不够。
     const hot = !!s.rage;
-    const cRing = hot ? '255,130,160' : '201,166,255';
-    const cBody = hot ? '#4a1c3e' : '#3a2a5e';
-    const cCore = hot ? '255,206,218' : '232,216,255';
-    const cBar = hot ? '#ff7a8a' : '#c9a6ff';
+    const blue = !hot && s.dir < 0;
+    const cRing = hot ? '255,130,160' : (blue ? '140,190,255' : '201,166,255');
+    const cBody = hot ? '#4a1c3e' : (blue ? '#1d2b52' : '#3a2a5e');
+    const cCore = hot ? '255,206,218' : (blue ? '208,228,255' : '232,216,255');
+    const cBar = hot ? '#ff7a8a' : (blue ? '#8fc8ff' : '#c9a6ff');
     const glowA = hot ? 0.13 + Math.abs(Math.sin(s.spawnT * 9)) * 0.10 : 0.13;
 
     ctx.save();
@@ -2317,12 +2479,96 @@ class Game {
     return false;
   }
 
+  /** 宽头弹开路：吞掉途中碰到的敌方子弹。
+   *  不消耗自身、也不掉伤害——它 14 秒的全部价值就是"清出一条通道"，
+   *  如果吞一颗就消失，最多清十几颗，玩家根本感觉不到这道具存在过。 */
+  _wideSweep(b) {
+    const rr = b.r + 14;             // 比弹体略大：贴图边缘蹭到也算
+    for (const e of this.bullets) {
+      if (!e.active || e.friendly) continue;
+      const dx = e.x - b.x, dy = e.y - b.y;
+      if (dx * dx + dy * dy > rr * rr) continue;
+      e.active = false;
+      this.addParticle(e.x, e.y, {
+        vx: rand(-30, 30), vy: rand(-40, 10), life: 0.2, r: 3, color: '#7bffcf'
+      });
+    }
+  }
+
+  /** 偏折面：把正面（护盾法线 ±arc/2）射进来的玩家子弹拨开。
+   *  注意三件事：
+   *  1) 子弹不消失、伤害不减免——它还是玩家的子弹，只是换了方向，
+   *     所以拨出去之后可能打到旁边/后方的敌机。这是"保护后排"而不是"吃弹"。
+   *  2) 偏折方向取护盾的**切向**（约 90°），不是原路弹回。
+   *     原路弹回等于这颗子弹直接作废，玩家只会觉得"被吃了"。
+   *  3) 护盾有耐久（cap 发），打空进入 down 秒过载。没有这条就是换皮无敌怪。
+   */
+  _deflect(b) {
+    if (b.defT > 0) return false;
+    for (const e of this.enemies) {
+      if (!e.active) continue;
+      const D = e.def.deflect;
+      if (!D || e.deflectHp <= 0) continue;
+
+      const dx = b.x - e.x, dy = b.y - e.y;
+      const rr = e.r + b.r + 6;
+      if (dx * dx + dy * dy > rr * rr) continue;
+
+      let diff = Math.atan2(dy, dx) - D.aim;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      if (Math.abs(diff) > D.arc / 2) continue;
+
+      // 1) 位置：沿当前方位推到判定圈外，保证本帧不会又和本体重叠
+      const len = Math.hypot(dx, dy) || 1;
+      b.x += dx / len * (Math.max(0, rr - len) + 2);
+      b.y += dy / len * (Math.max(0, rr - len) + 2);
+
+      // 2) 速度：转向护盾切向，保留原速率
+      const sp = Math.hypot(b.vx, b.vy);
+      const va = Math.atan2(b.vy, b.vx);
+      const sgn = diff >= 0 ? 1 : -1;
+      const want = D.aim + sgn * (Math.PI / 2 - 0.12);
+      let d2 = want - va;
+      while (d2 > Math.PI) d2 -= Math.PI * 2;
+      while (d2 < -Math.PI) d2 += Math.PI * 2;
+      const na = va + Math.sign(d2) * Math.min(Math.abs(d2), D.bend);
+      b.vx = Math.cos(na) * sp;
+      b.vy = Math.sin(na) * sp;
+      b.rot = na + Math.PI / 2;
+      b.defT = 0.16;
+
+      // 3) 护盾耐久：拨掉一发少一发，打空就过载
+      e.deflectHp -= 1;
+      e.dflash = 0.14;
+      if (e.deflectHp <= 0) {
+        e.deflectDown = D.down;
+        this.addParticle(e.x, e.y, { vx: 0, vy: -40, life: 0.4, r: 18, color: '#8fe8ff' });
+      }
+      this.addParticle(b.x, b.y, {
+        vx: rand(-50, 50), vy: rand(-60, 20), life: 0.22, r: 4, color: '#9fe8ff'
+      });
+      SFX.hit();
+      return true;
+    }
+    return false;
+  }
+
   _collide() {
     const p = this.player;
 
     // 玩家子弹 → 敌机 / BOSS
     for (const b of this.bullets) {
       if (!b.active || !b.friendly) continue;
+
+      // 宽头弹：先把贴着的敌方子弹吞掉，再走正常命中判定。
+      // 放在最前面，因为它"开路"的价值要先于打伤害体现
+      if (b.wideBlock) this._wideSweep(b);
+
+      // 偏折面：把正面来的子弹拨走。顺序必须在本体判定之前——
+      // 拨开之后再走一遍命中判定，子弹会立刻在本体上结算一次伤害，
+      // 这个机制就变成了"纯特效"。
+      if (this._deflect(b)) continue;
 
       // 注意：invuln 必须放在外层条件里。
       // 之前写成 `if (bo.invuln) continue;`，会连下面打小怪的循环一起跳过，
@@ -2490,6 +2736,38 @@ class Game {
       }
     }
 
+    // 护盾：机头前方的半椭圆挡板，只吃子弹不吃撞机。
+    // 放在"敌方子弹 → 玩家"之前、环绕机之后：护盾是最外层的一道，
+    // 同一颗弹被环绕机挡掉就不该再扣护盾耐久。
+    if (p.shield) {
+      const C = TEMP.shield;
+      const sx = p.x, sy = p.y - C.oy;
+      for (const b of this.bullets) {
+        if (!b.active || b.friendly) continue;
+        /* 半椭圆：罩口朝上，只挡上半个椭圆的弹。
+         * 底边判定留出子弹半径的重叠（b.r*0.6）：子弹贴着底边飞进来时，
+         * 视觉上明明压在盾板上，若只认"球心在上方"就会出现"穿盾而过"的落差。 */
+        if (b.y - b.r * 0.6 > sy) continue;
+        // 椭圆归一化判定：dx²+dy² ≤ 1 即在罩内。子弹半径折半计入，
+        // 大弹不必"中心点进椭圆"才算挡下
+        const dx = (b.x - sx) / (C.rx + b.r * 0.6);
+        const dy = (b.y - sy) / (C.ry + b.r * 0.6);
+        if (dx * dx + dy * dy > 1) continue;
+        b.active = false;
+        p.shield.hp -= 1;
+        p.shield.hitT = 0.12;
+        this.addParticle(b.x, b.y, {
+          vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 4, color: '#9fe8ff'
+        });
+        SFX.hit();
+        if (p.shield.hp <= 0) {         // 打穿：这一帧之后不再挡，避免"碎盾还吸弹"
+          p.shield = null;
+          this.onTempEnd(p, 'shield');
+          break;
+        }
+      }
+    }
+
     // 敌方子弹 → 玩家
     for (const b of this.bullets) {
       if (!b.active || b.friendly) continue;
@@ -2506,9 +2784,16 @@ class Game {
       if (!e.active) continue;
       // 从底部升起的单位在爬升阶段穿过屏幕，玩家常挡在路径上。
       // 不豁免的话 miniboss 会直接撞死自己，玩家也白掉命。
-      if (e.fromBottom && e.y > 320) continue;
+      // 但冲角型小 BOSS 的俯冲是**朝下**冲过玩家，那一段必须能撞到，
+      // 所以只有"正在爬升/悬停"才豁免。
+      const ramming = e.def.mb === 'ram' && e.ramState === 2;
+      if (e.fromBottom && e.y > 320 && !ramming) continue;
       if (dist2(p.x, p.y, e.x, e.y) < (PLAYER.hitR + e.r * 0.8) * (PLAYER.hitR + e.r * 0.8)) {
-        e.hit(999, null, this);
+        // 冲角型不因撞机自毁：它是唯一主动撞上来的单位，
+        // 如果撞到就死，"被撞一下顺手换掉一个小 BOSS"会变成最优解
+        // 蛇头同样不吃撞机伤害：999 打在 1000 血的头上等于"撞一下就剩 1 血"，
+        // 那条命换的血量太离谱。撞上去只惩罚玩家，蛇本身当墙处理。
+        if (!ramming && e.kind !== 'snakeHead') e.hit(999, null, this);
         if (this.god) continue;
         p.hit(this);
         if (!p.alive) return;
@@ -2543,6 +2828,14 @@ class Game {
           p.addOrbit(this);
         } else if (k.kind === 'L') {
           p.lasers = Math.min(PLAYER.maxLaserBombs, p.lasers + 1);
+        } else if (k.kind === 'S') {
+          p.gainShield(this);
+        } else if (k.kind === 'T') {
+          p.gainTempWpn(this, 'track');
+        } else if (k.kind === 'D') {
+          p.gainTempWpn(this, 'wide');
+        } else if (k.kind === 'A') {
+          p.gainTempAlly(this);
         } else {
           p.lives = Math.min(PLAYER.maxLives, p.lives + 1);
         }
@@ -2652,6 +2945,25 @@ class Game {
 
     this._drawSoundButton(ctx);
     this._drawDevPanel(ctx);
+
+    // 玩家受击：红晕压在 HUD 之下、白闪之前。
+    // 中心留空，只在四周上色——弹幕全在画面中段，整屏糊红会看不清该往哪躲。
+    if (this.hurtT > 0) {
+      const k = this.hurtT / HURT_DUR;
+      // 全屏只给很薄一层（0.06）：稍厚一点就把整屏弹幕都染红，密集弹幕段
+      // 反而看不清该往哪躲。真正传达"挨打了"的是四周那圈红晕。
+      ctx.fillStyle = 'rgba(255,70,90,' + (0.06 * k * k).toFixed(3) + ')';
+      ctx.fillRect(0, 0, VIEW.w, VIEW.h);
+      /* 红晕只染最外圈：起点 0.36H、终点 0.60H（≈屏幕对角半径）。
+       * 起点再往内挪就会盖住中段的弹幕；只贴边才像"屏幕警示"而不是"加了层滤镜"。 */
+      const cx = VIEW.w / 2;
+      const cy = VIEW.h * 0.55;
+      const rg = ctx.createRadialGradient(cx, cy, VIEW.h * 0.36, cx, cy, VIEW.h * 0.60);
+      rg.addColorStop(0, 'rgba(255,40,60,0)');
+      rg.addColorStop(1, 'rgba(255,40,60,' + (0.55 * k).toFixed(3) + ')');
+      ctx.fillStyle = rg;
+      ctx.fillRect(0, 0, VIEW.w, VIEW.h);
+    }
 
     // 保险白闪
     if (this.flashT > 0) {
@@ -2801,14 +3113,15 @@ class Game {
       ctx.fillText('×' + this.player.lives, VIEW.w - 24 - shownLives * 26 + 8, 33);
     }
 
-    this._drawWeaponSlots(ctx, 18, 62);
+    this._drawWeaponSlots(ctx);
+    this._drawTempHud(ctx);
 
     // BOSS 血条
     if (this.bossActive && !this.boss.dead && !this.boss.enter && !this.boss.invuln) {
       const b = this.boss;
       const w = VIEW.w - 96;
       const x = 48;
-      const y = 92;
+      const y = 112;      // 临时增益占用了 86~106，血条下移一行避免叠在一起
       const pct = Math.max(0, b.hp / b.maxHp);
       ctx.fillStyle = 'rgba(6,10,16,0.7)';
       ctx.fillRect(x - 2, y - 2, w + 4, 12);
@@ -2835,25 +3148,45 @@ class Game {
     this._drawLaserButton(ctx);
   }
 
-  /** 武器槽：3 个胶囊，已有武器上色，空槽虚线 */
-  _drawWeaponSlots(ctx, x, y) {
-    const w = 74;
-    const h = 18;
-    const gap = 5;
+  /** 武器槽：WEAPON_SLOTS 个胶囊（当前 4 个），主武器（伤害 100%）高亮，空槽虚线。
+   *  主武器可以由玩家点槽位 / 按 Q 切换，所以主位必须有明确标记 ——
+   *  几格长得一样的话，玩家切完枪看不出哪把在打满伤害。 */
+  _drawWeaponSlots(ctx) {
+    const { x: sx, y, w, h, gap } = SLOT_UI;
+    const p = this.player;
+    const canSwap = p.weapons.length > 1;
+    const flash = this.wpnSwapT > 0 ? Math.min(1, this.wpnSwapT / 0.45) : 0;
+
     ctx.save();
     ctx.textBaseline = 'middle';
     for (let i = 0; i < WEAPON_SLOTS; i++) {
-      const bx = x + i * (w + gap);
-      const idx = this.player.weapons[i];
+      const bx = sx + i * (w + gap);
+      const idx = p.weapons[i];
       const has = idx !== undefined;
+      const main = i === 0 && has;
       const col = has ? WEAPONS[idx].color : 'rgba(120,150,180,0.30)';
 
-      ctx.fillStyle = has ? 'rgba(8,20,30,0.80)' : 'rgba(8,16,24,0.42)';
+      ctx.fillStyle = main ? 'rgba(10,26,38,0.92)'
+        : (has ? 'rgba(8,20,30,0.80)' : 'rgba(8,16,24,0.42)');
       ctx.fillRect(bx, y, w, h);
       ctx.strokeStyle = col;
-      ctx.lineWidth = i === 0 && has ? 1.6 : 1;
+      ctx.lineWidth = main ? 1.8 : 1;
       if (has) {
         ctx.strokeRect(bx + 0.5, y + 0.5, w - 1, h - 1);
+        if (main) {
+          // 顶部亮条 + 左侧小三角：切换瞬间变白，给一次"顺序变了"的确认
+          ctx.save();
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = flash > 0 ? '#ffffff' : col;
+          ctx.fillRect(bx + 1, y + 1, w - 2, 2);
+          ctx.beginPath();
+          ctx.moveTo(bx - 5, y + h / 2 - 4);
+          ctx.lineTo(bx - 1, y + h / 2);
+          ctx.lineTo(bx - 5, y + h / 2 + 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
       } else {
         // 空槽用点线，一眼看出还能再装
         ctx.setLineDash([3, 3]);
@@ -2867,12 +3200,77 @@ class Game {
       ctx.fillText(has ? WEAPONS[idx].name : '+', bx + w / 2, y + h / 2 + 0.5);
     }
 
+    const lx = sx + WEAPON_SLOTS * (w + gap) + 2;
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(150,205,235,0.82)';
     ctx.font = '10px ui-monospace, monospace';
-    ctx.fillText('LV' + this.player.power, x + WEAPON_SLOTS * (w + gap) + 2, y + h / 2 + 0.5);
+    ctx.fillText('LV' + p.power, lx, y + 5);
+    if (canSwap) {
+      // 有第二把武器才提示可切：只有一把时显示等于撒谎
+      ctx.fillStyle = 'rgba(150,205,235,' + (0.42 + flash * 0.5).toFixed(2) + ')';
+      ctx.font = '8px ui-monospace, monospace';
+      ctx.fillText('<> SWAP', lx, y + h - 3);
+    }
     ctx.restore();
     ctx.textAlign = 'left';   // textBaseline 由 restore 还原，别在这里改
+  }
+
+  /** 临时增益条：护盾 / 临时武器 / 临时僚机各一条剩时进度。
+   *  三种效果都是自动到期，不给剩余时间的话玩家只能"感觉好像没了"，
+   *  没法判断该压上去用掉还是该退。护盾额外显示剩余耐久。 */
+  _drawTempHud(ctx) {
+    const p = this.player;
+    const rows = [];
+    if (p.shield) {
+      rows.push({
+        id: 'shield', t: p.shield.t, max: TEMP.shield.dur,
+        left: 'SHIELD ' + Math.max(0, Math.ceil(p.shield.hp))
+      });
+    }
+    if (p.tempWpn) {
+      const C = TEMP[p.tempWpn.id];
+      rows.push({ id: p.tempWpn.id, t: p.tempWpn.t, max: C.dur, left: TEMP_INFO[p.tempWpn.id].title });
+    }
+    if (p.tempAlly) {
+      rows.push({ id: 'ally', t: p.tempAlly.t, max: TEMP.ally.dur, left: TEMP_INFO.ally.title });
+    }
+    if (!rows.length) return;
+
+    const w = 82, h = 18, gap = 6, x0 = 18, y0 = 86;
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const info = TEMP_INFO[r.id];
+      const bx = x0 + i * (w + gap);
+      const k = clamp(r.t / r.max, 0, 1);
+      // 剩不到 3 秒整条闪一下，和游戏里其它"要过期了"的提示保持同一套语言
+      const urgent = r.t < 3 && Math.floor(r.t * 6) % 2 === 0;
+
+      ctx.globalAlpha = urgent ? 0.55 : 1;
+      ctx.fillStyle = 'rgba(8,16,24,0.78)';
+      ctx.fillRect(bx, y0, w, h);
+      ctx.strokeStyle = info.color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, y0 + 0.5, w - 1, h - 1);
+
+      // 剩余时间：底部细条，随剩余比例从左往右缩回
+      ctx.globalAlpha = (urgent ? 0.55 : 1) * 0.6;
+      ctx.fillStyle = info.color;
+      ctx.fillRect(bx + 1, y0 + h - 2.5, (w - 2) * k, 2);
+
+      ctx.globalAlpha = urgent ? 0.75 : 1;
+      ctx.fillStyle = info.color;
+      ctx.font = '8px ui-monospace, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(r.left, bx + 5, y0 + h / 2);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(215,240,255,0.92)';
+      ctx.fillText(Math.ceil(r.t) + 's', bx + w - 5, y0 + h / 2);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    ctx.textAlign = 'left';
   }
 
   /** 冷却进度环：从 12 点顺时针缩短，环消失 = 可以再按。
@@ -3231,7 +3629,7 @@ class Game {
   /* ------------------------------------------------ 碰撞盒可视化（调试） */
 
   /** 只画“真正参与判定”的形状，不画贴图轮廓：
-   *  玩家 hitR(9) / 敌机 e.r / 敌弹 b.r / 道具 32 / BOSS 本体矩形 / 部件 / 浮游炮。
+   *  玩家 hitR(6) / 敌机 e.r / 敌弹 b.r（已乘 ENEMY_BULLET_HIT_K）/ 道具 32 / BOSS 本体矩形 / 部件 / 浮游炮。
    *  每个形状都对应 `_collide()` 与 `_collectPickups()` 里的一条判定，
    *  改判定时必须同步改这里，否则这个调试开关就没有意义了。
    */
@@ -3266,6 +3664,26 @@ class Game {
     for (const e of this.enemies) {
       if (!e.active) continue;
       ring(e.x, e.y, e.r, 'rgba(255,209,102,0.95)', 1);
+
+      // 偏折面：判定 = "护盾法线 ±arc/2 的扇区" AND "半径 r + 弹半径 + 6 的圈"。
+      // 这里按 r+6 画（弹半径逐颗不同），扇区边界与 _deflect 一一对应
+      const D = e.def.deflect;
+      if (D) {
+        const on = e.deflectHp > 0;
+        ctx.strokeStyle = on ? 'rgba(120,235,255,0.95)' : 'rgba(255,120,120,0.6)';
+        ctx.lineWidth = 1.2;
+        const R2 = e.r + 6;
+        for (const sgn of [-1, 1]) {
+          const a = D.aim + sgn * D.arc / 2;
+          ctx.beginPath();
+          ctx.moveTo(e.x, e.y);
+          ctx.lineTo(e.x + Math.cos(a) * R2, e.y + Math.sin(a) * R2);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, R2, D.aim - D.arc / 2, D.aim + D.arc / 2);
+        ctx.stroke();
+      }
     }
 
     // BOSS：本体是多圆轮廓（BOSS_HULL），部件与浮游炮也是圆
@@ -3329,6 +3747,20 @@ class Game {
       ctx.lineTo(p.x + 3.5, p.y);
       ctx.moveTo(p.x, p.y - 3.5);
       ctx.lineTo(p.x, p.y + 3.5);
+      ctx.stroke();
+    }
+
+    // 护盾：半椭圆判定（上半个 + 截口）。只在装盾时出现，形状要和 _drawShield 一致，
+    // 否则调试层会显示"一个圈"，玩家以为背后也挡得住
+    if (p.alive && p.shield) {
+      const C = TEMP.shield;
+      const sx = p.x, sy = p.y - C.oy;
+      // 用品红而不是青色：护盾本身是青蓝，同色线框会被外缘吃掉，分不清哪圈才是判定
+      ctx.strokeStyle = 'rgba(255,120,225,0.95)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, C.rx, C.ry, 0, Math.PI, Math.PI * 2);
+      ctx.closePath();
       ctx.stroke();
     }
 
@@ -3776,6 +4208,10 @@ class Game {
     ctx.fillStyle = 'rgba(130,175,205,0.68)';
     ctx.font = '11px "PingFang SC", sans-serif';
     ctx.fillText('方向键 / WASD 移动　·　自动开火　·　拖拽更跟手', cx, VIEW.h * 0.572);
+    // 切枪是 3.21 新增的：不写出来没人会去点 HUD 上的几个小胶囊
+    ctx.fillStyle = 'rgba(150,205,235,0.55)';
+    ctx.font = '11px "PingFang SC", sans-serif';
+    ctx.fillText('点武器槽 / 数字键 1~' + WEAPON_SLOTS + ' / Q　切换主武器（伤害 100% 那格）', cx, VIEW.h * 0.604);
 
     /* ---------- 道具说明 ---------- */
     const items = [
@@ -3835,7 +4271,7 @@ class Game {
     // 满级机制提示
     ctx.font = '10px "PingFang SC", sans-serif';
     ctx.fillStyle = 'rgba(255,210,120,0.72)';
-    ctx.fillText('W：不同武器各占一槽（最多 3 个），同时开火', cx, y0 + 62);
+    ctx.fillText('W：不同武器各占一槽（最多 ' + WEAPON_SLOTS + ' 个），同时开火', cx, y0 + 62);
     ctx.fillStyle = 'rgba(255,180,140,0.66)';
     ctx.fillText('W：满级后再吃同款 → 全弹发射', cx, y0 + 78);
     ctx.fillStyle = 'rgba(160,240,255,0.72)';
@@ -3844,6 +4280,9 @@ class Game {
     ctx.fillText('R：环绕机最多 2 台；能挡子弹、撞敌机', cx, y0 + 110);
     ctx.fillStyle = 'rgba(180,140,255,0.8)';
     ctx.fillText('L：激光保险 · X 清屏炸弹 / C 或 L 放激光', cx, y0 + 126);
+    // 临时增益用菱形，和上面圆形的永久道具在视觉上分开
+    ctx.fillStyle = 'rgba(159,232,255,0.72)';
+    ctx.fillText('◇ S 护盾 / T 追踪弹 / D 宽头弹 / A 僚机：临时增益，到期消失', cx, y0 + 142);
 
     ctx.fillStyle = 'rgba(110,150,180,0.45)';
     ctx.font = '9px ui-monospace, monospace';
