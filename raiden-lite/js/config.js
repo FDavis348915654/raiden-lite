@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.25.2';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.29.1';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -111,7 +111,12 @@ const PLAYER = {
    * 子弹判定同步收窄，两者一起缩才不会出现"看着擦过去了却算中"的落差。 */
   hitR: 6,
   startPower: 1,
-  maxPower: 3,
+  /* 火力等级上限 3 → 5。
+   * 多出来的两级**不抬高天花板**：L5 的总 DPS 仍按旧版三级封顶（单槽约 70）设计，
+   * 只是把 1→满级拆成五段，让前期的每次 P 都能看见一小步。
+   * 因此单发伤害逐级下调（枪数在涨、每颗更轻），见 entities.js fireFrom 的伤害表。
+   * 升满要多捡两瓶 P，因为 P 掉落没变，实际满级时间点会往后挪半关左右。 */
+  maxPower: 5,
   maxOptions: 2,            // 僚机上限（沙罗曼蛇式 Option）
   /* 僚机已满时再吃僚机道具（O / 已在场的 A）的无敌时间：3.5 → 5.5。
    * 冗余道具本来就是"没得选时的安慰奖"，给到 5.5 秒才真能当一次保命用。 */
@@ -177,22 +182,28 @@ const PLAYER = {
 const ENEMY_BULLET_HIT_K = 0.72;
 
 /* ---------------- 武器表 ----------------
- * 4 种武器由道具 W 循环切换，火力等级 P 影响弹道数量与伤害
+ * 9 种武器由道具 W 循环切换，火力等级 P（1~5，见 PLAYER.maxPower）影响弹道数量与伤害
  * cd: 开火间隔（秒）
  */
+/* 解锁节奏：**每关 +2 把，第 5 关集齐 9 把**（3.28 起）。
+ * 原来每关只开一把、第 8 关才集齐，导致前中期每一关的可选武器只有 2~4 把，
+ * 四个槽永远凑不出真正不同的组合，"换枪"这件事就没被玩到。
+ * 现在前四关各开两把，第 5 关补上最后一把：第 3 关起池子就有 6 把，
+ * 四槽的组合开始有取舍；后半程（6~9 关）用满池 + 掉落加权维持丰富度。
+ * 代价是新枪在解锁关的"当关必见"概率被摊薄，所以 W 的权重同步上调（见 DROPS）。 */
 const WEAPONS = [
   { id: 'vulcan',  name: 'VULCAN',  cn: '火神炮',   color: '#7fe0ff', cd: 0.100, from: 1 },
-  /* 散射炮：一次 15 发的霰弹，射速刻意放慢（0.28s），靠"一片弹丸"而不是"持续泼水" */
+  /* 散射炮：一片扇面弹丸，射速刻意放慢（0.34s），靠"覆盖"而不是"持续泼水" */
   { id: 'spread',  name: 'SPREAD',  cn: '散射炮',   color: '#d8ff70', cd: 0.340, from: 1 },
   { id: 'laser',   name: 'LASER',   cn: '穿透激光', color: '#ff6b9d', cd: 0.120, from: 2 },
-  { id: 'missile', name: 'MISSILE', cn: '追踪导弹', color: '#8dff9e', cd: 0.360, from: 3 },
-  /* --- 后期解锁 --- */
-  { id: 'plasma',  name: 'PLASMA',  cn: '等离子炮', color: '#c08cff', cd: 0.300, from: 4 },
-  { id: 'flak',    name: 'FLAK',    cn: '散榴弹',   color: '#ff9a5c', cd: 0.420, from: 5 },
-  { id: 'tesla',   name: 'TESLA',   cn: '电弧炮',   color: '#7dfaff', cd: 0.240, from: 6 },
-  /* --- 带后向火力 --- */
+  { id: 'missile', name: 'MISSILE', cn: '追踪导弹', color: '#8dff9e', cd: 0.360, from: 2 },
+  /* --- 中期：开始有"重火力 / 特殊弹道"的分工 --- */
   { id: 'backfire', name: 'BACKFIRE', cn: '逆火炮', color: '#5ce0b8', cd: 0.160, from: 3 },
-  { id: 'omni',    name: 'OMNI',    cn: '环射炮',   color: '#ffb3e6', cd: 0.340, from: 6 }
+  { id: 'plasma',  name: 'PLASMA',  cn: '等离子炮', color: '#c08cff', cd: 0.300, from: 3 },
+  { id: 'flak',    name: 'FLAK',    cn: '散榴弹',   color: '#ff9a5c', cd: 0.420, from: 4 },
+  /* --- 后期：清屏与覆盖 --- */
+  { id: 'tesla',   name: 'TESLA',   cn: '电弧炮',   color: '#7dfaff', cd: 0.240, from: 4 },
+  { id: 'omni',    name: 'OMNI',    cn: '环射炮',   color: '#ffb3e6', cd: 0.340, from: 5 }
 ];
 
 /* 武器槽：吃到不同武器会占一个槽，多个槽同时开火
@@ -306,6 +317,40 @@ function unlockedWeapons(stageId) {
   return out.length ? out : [0];
 }
 
+/** 掉落 / 补给里"这一瓶是哪把枪"的加权抽取。
+ *  纯随机会让解锁失去意义：第 5 关武器池 9 把，刚解锁的环射炮只有 1/9 概率，
+ *  一整关可能一次都见不到。权重按三档：
+ *    本关新解锁 ×6  未拥有 ×3  已拥有 ×2
+ *  既保证新枪在解锁关露脸，也不至于把玩家用顺手的枪彻底挤掉。
+ *  「已拥有」从 ×1 提到 ×2：同款 W 现在会给那把枪单独 +1 级（见 Player.addWeapon），
+ *  它是"专精一把枪"的唯一手段，权重太低这条成长线就等于不存在。 */
+function pickWeaponIdx(stageId, owned) {
+  const pool = unlockedWeapons(stageId);
+  const own = owned || [];
+  const w = pool.map(i => {
+    if ((WEAPONS[i].from || 1) === stageId) return 6;
+    return own.indexOf(i) >= 0 ? 2 : 3;
+  });
+  let total = 0;
+  for (const k of w) total += k;
+  let r = Math.random() * total;
+  for (let j = 0; j < pool.length; j++) {
+    r -= w[j];
+    if (r <= 0) return pool[j];
+  }
+  return pool[pool.length - 1];
+}
+
+/** 精英率随关卡上升：第 1 关 4%，第 9 关 21%（原 5%~16%）。
+ *  精英是"同一套机型、更高强度"的加压手段，越往后越该多；
+ *  3.28 把斜率从 0.0125 提到 0.021：后期同屏经常同时挂着两只精英，
+ *  它们 3.2 倍血 + 掉一份高价值道具（3.29.1 之前是双掉落，道具刷得太凶），
+ *  是整个难度曲线里最直接的一档台阶。
+ *  前期仍压得低——第 1 关就满屏精英会把"认机型"这件事盖掉。 */
+function eliteChance(stageId) {
+  return clamp(0.04 + (stageId - 1) * 0.021, 0.04, 0.21);
+}
+
 /* 续关：死亡后进入限时续关窗口，最多续 3 次 */
 const CONTINUE = {
   max: 3,          // 一局内最多续关次数
@@ -314,9 +359,10 @@ const CONTINUE = {
   invuln: 3.4      // 续关后的无敌时间
 };
 
-/* 精英变体：中小型机有概率强化出场，血厚、体积大、掉落好 */
+/* 精英变体：中小型机有概率强化出场，血厚、体积大、掉落好。
+ * 概率随关卡上升，见下面的 eliteChance()——固定 9% 会让前期资源过富、
+ * 后期又嫌不够，这两个方向都不对。 */
 const ELITE_KINDS = ['scout', 'fighter', 'diver', 'drone', 'flame', 'mirror', 'eel', 'torpedo'];
-const ELITE_CHANCE = 0.09;
 const ELITE_HP_MUL = 3.2;
 
 /* 波次压缩系数：只放大数量不够，出场节奏不加快的话玩家会把它们逐个点掉
@@ -369,22 +415,94 @@ const TEMP_INFO = {
   ally:   { title: 'ALLY',    sub: '临时僚机 · 20s · 重复吃补无敌', color: '#c9b0ff' }
 };
 
-/* 掉落权重（累计区间） */
+/* 掉落权重（按关卡解锁）
+ * from : 从第几关开始掉。前两关只留"火力 / 换枪 / 保险 / 生命"四条主线——
+ *        玩家这时还在学走位，护盾、宽头弹这种"改变打法"的道具会盖住基础课，
+ *        而且一上来就塞四件临时增益，等于没有一件能被记住。
+ * w    : 权重，口径就是百分数（本关全部生效条目相加 = 总掉率）
+ *
+ * 设计取舍：击破掉落**不是**火力成长的主渠道，只管"打到的东西有点反馈"。
+ * 3.29.1 之前这里有个换算 bug（见 dropTable），实际是 100% 掉 P；
+ * 修好之后按"一个 4~8 架的编队掉 1~2 件"定总掉率：12% → 20%。
+ *
+ * P 的权重要**明显低于** W/B/H：4 瓶 P 就能把四把枪从 L1 顶到 L5，
+ * 它是全表单位价值最高的条目，给成常客会让 5 级系统在半关内走完。
+ */
 const DROPS = [
-  { kind: 'P', upto: 0.060 },   // 火力 +1
-  { kind: 'W', upto: 0.100 },   // 切换武器
-  { kind: 'B', upto: 0.128 },   // 保险 +1
-  { kind: 'H', upto: 0.145 },   // 生命 +1
-  { kind: 'O', upto: 0.158 },   // 僚机 +1（稀有）
-  { kind: 'R', upto: 0.180 },   // 环绕机 +1（稀有）
-  { kind: 'L', upto: 0.193 },   // 激光保险 +1（更稀有）
-  /* 临时增益：加起来只占 4 个百分点，比环绕机/激光雷还稀有。
-   * 它们的强度是"一整段战术优势"，常见的话会盖过武器成长这条主线。 */
-  { kind: 'S', upto: 0.203 },   // 护盾（30s）
-  { kind: 'T', upto: 0.213 },   // 高爆追踪弹（14s）
-  { kind: 'D', upto: 0.223 },   // 宽头弹（14s）
-  { kind: 'A', upto: 0.233 }    // 临时僚机（20s）
+  { kind: 'P', w: 0.9, from: 1 },   // 火力 +1（全槽）——最稀有：一瓶顶四瓶其他道具
+  /* W 权重第一：它一身两职——
+   * 既是"换一把新枪"，也是"给已有的那把单独升一级"。
+   * 每关解锁两把之后池子更大、抽中"想要的那把"更难，W 不能跟着一起砍。 */
+  { kind: 'W', w: 6.0, from: 1 },   // 换武器 / 同款升级
+  { kind: 'B', w: 3.0, from: 1 },   // 保险 +1
+  { kind: 'H', w: 1.8, from: 1 },   // 生命 +1
+  { kind: 'O', w: 1.4, from: 3 },   // 僚机 +1
+  { kind: 'R', w: 1.8, from: 3 },   // 环绕机 +1
+  { kind: 'L', w: 1.0, from: 5 },   // 激光保险 +1
+  { kind: 'S', w: 1.2, from: 5 },   // 护盾（30s）
+  { kind: 'T', w: 0.9, from: 6 },   // 高爆追踪弹（14s）
+  { kind: 'D', w: 0.9, from: 7 },   // 宽头弹（14s）
+  { kind: 'A', w: 0.9, from: 8 }    // 临时僚机（20s）
 ];
+
+/** 按关卡过滤后的累计区间表。
+ *  w 的口径是**百分数**（本关生效条目相加 = 总掉率，12.2 表示 12.2%），
+ *  这里统一折成 0~1 的概率，调用方直接拿 Math.random() 比即可。
+ *
+ *  【3.29.1 修的坑】之前这里把百分数原样当概率返回（upto 直接是 3.0 / 12.2），
+ *  而判定写的是 `Math.random() < d.upto`——随机数永远小于 3.0，
+ *  于是"每一次击破都命中区间表的第一条"，也就是**每架敌机必掉一瓶 P**。
+ *  表现就是满屏都是火力道具、两关全槽满级。百分数与本位概率必须只在一处换算。
+ */
+function dropTable(stageId) {
+  const out = [];
+  let acc = 0;
+  for (const d of DROPS) {
+    if ((d.from || 1) > stageId) continue;
+    acc += d.w;
+    out.push({ kind: d.kind, upto: acc / 100 });
+  }
+  return out;
+}
+
+/* ---------------- 四周补给 ----------------
+ * 击破掉落压下来之后，道具的"底盘"由这里承担：每隔 edgeSupplyGap() 秒，
+ * 从上下左右四条边随机挑一条送一份进场（左右两条边是横穿屏幕，见 Pickup.dirX）。
+ *
+ * 权重刻意压在 W / B / H 上：P 的绝对量由每关固定的 supply 点（每关 2 瓶）
+ * 加 BOSS 空投管够，这里再大量出 P，就又回到"两关满级"的老问题。
+ * W 第一：独立等级之后，"吃到我想要的那把"才是升级的唯一主动手段。
+ */
+const EDGE_SUPPLY = [
+  { kind: 'W', w: 4.6, from: 1 },
+  { kind: 'P', w: 1.2, from: 1 },
+  { kind: 'B', w: 2.2, from: 1 },
+  { kind: 'H', w: 1.3, from: 1 },
+  { kind: 'S', w: 1.4, from: 3 },
+  { kind: 'O', w: 1.0, from: 4 },
+  { kind: 'R', w: 1.0, from: 5 },
+  { kind: 'T', w: 1.0, from: 6 },
+  { kind: 'D', w: 1.0, from: 7 },
+  { kind: 'A', w: 0.9, from: 8 }
+];
+
+/** 间隔随关卡收紧：13s → 7.4s。后期敌人多、屏幕挤，道具得来得更勤才追得上消耗 */
+function edgeSupplyGap(stageId) {
+  return clamp(13 - stageId * 0.7, 7.4, 13);
+}
+
+/** 抽这一份四周补给是什么（按关卡过滤权重） */
+function pickEdgeSupply(stageId) {
+  const pool = EDGE_SUPPLY.filter(d => (d.from || 1) <= stageId);
+  let sum = 0;
+  for (const d of pool) sum += d.w;
+  let r = Math.random() * sum;
+  for (const d of pool) {
+    r -= d.w;
+    if (r <= 0) return d.kind;
+  }
+  return pool[pool.length - 1].kind;
+}
 
 const SCORE = { pickup: 50, bossKill: 5000, stageClear: 2000, bombKill: 60 };
 
@@ -513,6 +631,12 @@ const SPAWN_GUARD = {
 };
 
 /* ---------------- 关卡 ----------------
+ * density       : 非小 BOSS 波次的数量倍率。3.28 起从 1.30 阶梯拉到 2.78
+ *                 （原 1.35~2.00）。前四关只微调，第 5 关起每关跳一档，
+ *                 让"后期明显更挤"成为曲线的主体，而不是靠血量慢慢堆。
+ * bossHp        : BOSS 血量。3.28 起后四关各上调 15~25%，配合 bossRate。
+ * bossRate      : BOSS 弹幕间隔倍率（乘在 pattern 返回值上）。1.0 = 原速，
+ *                 0.84 = 出招快 19%。只给第 5 关以后，前期不给。
  * waves[].at    : 关卡开始后第几秒生成
  * form          : line 横排 / vee V 字 / column 竖列 / sides 两侧 / arc 弧形
  * gap           : 同波内每架之间的出场延迟
@@ -539,31 +663,32 @@ const LEVELS = [
     sub: 'STAGE 1 · CLOUD PATROL',
     bg: 'bg1',
     accent: '#7fd6ff',
-    density: 1.35,
+    density: 1.30,
     boss: 'boss1',
     bossName: '苍鹰母舰',
     support: 'fighter',
     bossHp: 2200,
+    hint: '编队俯冲 · 侧向来袭',
     // 云端哨戒：云层气流把补给往上托，主流仍是自上飘下，第 3 份落到底边被弹回去
     supply: [
-      { at: 7,  kind: 'P', from: 'top' },
-      { at: 14, kind: 'W', from: 'rise' },
-      { at: 22, kind: 'P', from: 'bounce' },
-      { at: 31, kind: 'B', from: 'rise' },
-      { ev: 'miniboss', delay: 1.4, kind: 'B', from: 'bounce' }
+      { at: 6,  kind: 'P', from: 'top' },
+      { at: 12, kind: 'W', from: 'rise' },
+      { at: 19, kind: 'P', from: 'bounce' },
+      { at: 24, kind: 'B', from: 'rise' }
     ],
+    /* 教学关：全场只有 3 种机型，节奏是"单排出场 → V 字 → 侧向 → 慢速重装"。
+     * 一架 bomber 要打 1.5 秒才碎，是玩家第一次体验"打不死的东西"；
+     * 放在第 15 秒而不是开场，先让 scout 把射击手感立住。 */
     waves: [
-      { at: 1.5,  kind: 'scout',     n: 5,  form: 'line',   speed: 115, gap: 0.16 },
-      { at: 11.5, kind: 'scout',    n: 5,  side: 'left',  gap: 0.14 },   // 教学：第一次见到侧向来敌
-      { at: 5.2,  kind: 'scout',     n: 6,  form: 'vee',    speed: 120, gap: 0.14 },
-      { at: 9.2,  kind: 'fighter',   n: 3,  form: 'line',   speed: 95,  gap: 0.35 },
-      { at: 13.8, kind: 'bomber',    n: 2,  form: 'sides',  speed: 66,  gap: 0.6 },
-      { at: 18.2, kind: 'scout',     n: 8,  form: 'arc',    speed: 130, gap: 0.10 },
-      { at: 22.8, kind: 'fighter',   n: 4,  form: 'vee',    speed: 100, gap: 0.30 },
-      { at: 27.4, kind: 'bomber',    n: 3,  form: 'line',   speed: 70,  gap: 0.55 },
-      { at: 32.4, kind: 'scout',     n: 10, form: 'line',   speed: 140, gap: 0.12 },
-      { at: 36.8, kind: 'scout',   n: 9, form: 'diamond', speed: 138, gap: 0.10 },
-      { at: 41.2, kind: 'fighter', n: 5, form: 'pincer',  speed: 105, gap: 0.30 }
+      { at: 1.5,  kind: 'scout',   n: 4,  form: 'line',    speed: 112, gap: 0.16 },
+      { at: 5.5,  kind: 'scout',   n: 5,  form: 'vee',     speed: 118, gap: 0.14 },
+      { at: 9.0,  kind: 'fighter', n: 3,  form: 'line',    speed: 95,  gap: 0.36 },
+      { at: 12.5, kind: 'scout',   n: 4,  side: 'left',   gap: 0.14 },   // 教学：第一次见到侧向来敌
+      { at: 15.5, kind: 'bomber',  n: 2,  form: 'sides',   speed: 64,  gap: 0.7 },
+      { at: 19.0, kind: 'scout',   n: 7,  form: 'arc',     speed: 126, gap: 0.11 },
+      { at: 22.5, kind: 'fighter', n: 4,  form: 'vee',     speed: 100, gap: 0.30 },
+      { at: 25.5, kind: 'bomber',  n: 2,  form: 'line',    speed: 68,  gap: 0.6 },
+      { at: 27.0, kind: 'scout',   n: 8,  form: 'diamond', speed: 132, gap: 0.10 }
     ]
   },
   {
@@ -572,41 +697,35 @@ const LEVELS = [
     sub: 'STAGE 2 · DUSK CANYON',
     bg: 'bg2',
     accent: '#ffb066',
-    density: 1.42,
+    density: 1.40,
     boss: 'boss2',
     bossName: '岩甲巨蟹',
     support: null,
     bossHp: 2800,
+    hint: '俯冲机 · 浮雷',
     // 黄昏峡谷：峡谷热风横着刮，道具一路摆着下来；落底的会被风托回一段
     supply: [
-      { at: 7,  kind: 'P', from: 'top', sway: 34 },
-      { at: 15, kind: 'W', from: 'bounce', sway: 30 },
-      { at: 23, kind: 'P', from: 'rise', sway: 40 },
-      { at: 31, kind: 'H', from: 'top' },
+      { at: 6,  kind: 'P', from: 'top', sway: 34 },
+      { at: 13, kind: 'W', from: 'bounce', sway: 30 },
+      { at: 21, kind: 'P', from: 'rise', sway: 40 },
+      { at: 27, kind: 'H', from: 'top' },
       { ev: 'miniboss', delay: 1.4, kind: 'P', from: 'bounce' }
     ],
+    /* 本关只教三件事：俯冲机的落点、编队机的密度、浮雷"打爆会溅射"。
+     * 单只小 BOSS 放在最后 2 秒——它是第一个小 BOSS，必须单独出场，
+     * 让玩家专心看清"从底部升起 → 顶部巡游 → 三向散射"这套流程，
+     * 而不是像原来那样和 mbSniper 同时压上来（那时两种弹幕混在一起没法读）。 */
     waves: [
-      { at: 1.5,  kind: 'diver',     n: 4,  form: 'line',   speed: 80,  gap: 0.30 },
-      { at: 7.8,  kind: 'diver',    n: 4,  side: 'right', gap: 0.16 },   // 从右侧切入后俯冲
-      { at: 16.8, kind: 'scout',    n: 6,  side: 'left',  gap: 0.12, arc: true },  // 弧线：左下 → 左上
-      { at: 5.6,  kind: 'formation', n: 5,  form: 'vee',    speed: 110, gap: 0.14 },
-      { at: 9.8,  kind: 'mine',      n: 5,  form: 'arc',    speed: 40,  gap: 0.44 },
-      { at: 14.2, kind: 'diver',     n: 6,  form: 'sides',  speed: 90,  gap: 0.26 },
-      { at: 18.4, kind: 'formation', n: 7,  form: 'arc',    speed: 115, gap: 0.12 },
-      { at: 22.8, kind: 'mine',      n: 6,  form: 'line',   speed: 45,  gap: 0.40 },
-      { at: 27.2, kind: 'diver',     n: 8,  form: 'vee',    speed: 95,  gap: 0.22 },
-      { at: 32.0, kind: 'formation', n: 8,  form: 'line',   speed: 120, gap: 0.10 },
-      { at: 36.4, kind: 'formation', n: 8, form: 'wave',   speed: 118, gap: 0.12 },
-      { at: 40.8, kind: 'diver',     n: 6, form: 'pincer', speed: 95,  gap: 0.24 },
-      { at: 12.6, kind: 'mineH',     n: 3, form: 'arc',    speed: 34,  gap: 0.55 },
-      { at: 24.6, kind: 'looper',    n: 4, form: 'line',   speed: 112, gap: 0.45 },
-      // 狙击手首秀：两架从两侧压进来，悬在上面慢慢打"慢起快收"的狙击弹
-      { at: 19.6, kind: 'sniper',    n: 3, form: 'arc',    speed: 58,  gap: 0.7 },
-      // 棱镜机首秀：正面顶偏折面，藏在它上方的编队才是真目标
-      { at: 34.4, kind: 'deflect',   n: 2, form: 'line',   speed: 50,  gap: 0.6 },
-      { at: 30.0, kind: 'miniboss',  n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.28 },
-      { at: 30.4, kind: 'mbSniper',  n: 1, form: 'line',   speed: 56,  gap: 0.5, lane: 0.74 },
-      { at: 21.0, kind: 'diver',    n: 5,  diag: 'ltr', gap: 0.14 },   // 对角：左下 → 右上
+      { at: 1.5,  kind: 'diver',     n: 4, form: 'line',   speed: 78,  gap: 0.32 },
+      { at: 5.0,  kind: 'formation', n: 5, form: 'vee',    speed: 108, gap: 0.15 },
+      { at: 8.5,  kind: 'diver',     n: 4, form: 'sides',  speed: 88,  gap: 0.26 },
+      { at: 12.0, kind: 'mine',      n: 3, form: 'arc',    speed: 40,  gap: 0.46 },
+      { at: 15.5, kind: 'formation', n: 5, form: 'arc',    speed: 112, gap: 0.13 },
+      { at: 18.5, kind: 'diver',     n: 4, side: 'right', gap: 0.15 },   // 从右侧切入后俯冲
+      { at: 21.5, kind: 'mine',      n: 4, form: 'line',   speed: 44,  gap: 0.42 },
+      { at: 24.5, kind: 'formation', n: 6, form: 'wave',   speed: 114, gap: 0.12 },
+      { at: 27.5, kind: 'diver',     n: 5, form: 'pincer', speed: 94,  gap: 0.24 },
+      { at: 29.5, kind: 'miniboss',  n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.5 }
     ]
   },
   {
@@ -620,33 +739,29 @@ const LEVELS = [
     bossName: '深渊之眼',
     support: 'eel',
     bossHp: 3500,
+    hint: '高速鱼雷 · 电鳗摆尾',
     // 深海要塞：洋流慢，补给从深处浮上来；落到要塞底部会反弹
     supply: [
-      { at: 7,  kind: 'P', from: 'rise', speed: 62 },
-      { at: 14, kind: 'W', from: 'rise', speed: 62, sway: 22 },
-      { at: 22, kind: 'P', from: 'bounce' },
-      { at: 30, kind: 'B', from: 'riseBounce', sway: 24 },
+      { at: 6,  kind: 'P', from: 'rise', speed: 62 },
+      { at: 13, kind: 'W', from: 'rise', speed: 62, sway: 22 },
+      { at: 21, kind: 'P', from: 'bounce' },
+      { at: 28, kind: 'B', from: 'riseBounce', sway: 24 },
       { ev: 'miniboss', delay: 1.4, kind: 'B', from: 'rise' }
     ],
+    /* 本关两个新单位刚好是一对反义词：torpedo 快、脆、直线；
+     * eel 慢、会潜到下方再窜上来、身体分段。所以段落也按"一快一慢"交替编，
+     * 让玩家在两种节奏之间切换，而不是被同一种东西反复碾。 */
     waves: [
-      { at: 1.5,  kind: 'torpedo',   n: 4,  form: 'column', speed: 250, gap: 0.28 },
-      { at: 15.5, kind: 'torpedo',  n: 6,  side: 'left',  gap: 0.16 },   // 高速从左侧掠过（6 架）
-      { at: 5.2,  kind: 'eel',       n: 3,  form: 'line',   speed: 85,  gap: 0.42 },
-      { at: 9.4,  kind: 'jelly',     n: 2,  form: 'sides',  speed: 50,  gap: 0.9 },
-      { at: 13.6, kind: 'torpedo',   n: 6,  form: 'sides',  speed: 275, gap: 0.22 },
-      { at: 17.8, kind: 'eel',       n: 4,  form: 'arc',    speed: 90,  gap: 0.36 },
-      { at: 22.0, kind: 'jelly',     n: 3,  form: 'line',   speed: 55,  gap: 0.8 },
-      { at: 26.4, kind: 'torpedo',   n: 8,  form: 'column', speed: 295, gap: 0.18 },
-      { at: 31.0, kind: 'eel',       n: 5,  form: 'sides',  speed: 95,  gap: 0.32 },
-      { at: 35.6, kind: 'torpedo', n: 6, form: 'wave',    speed: 272, gap: 0.20 },
-      { at: 40.0, kind: 'eel',     n: 5, form: 'diamond', speed: 92,  gap: 0.34 },
-      { at: 8.4,  kind: 'riser',   n: 3, form: 'line',    speed: 130, gap: 0.55 },
-      { at: 21.0, kind: 'riser',   n: 4, form: 'sides',   speed: 140, gap: 0.42 },
-      // 棱镜开路 + 电鳗跟在后上方：正下方打不动，只能从侧翼或齐射破盾
-      { at: 12.2, kind: 'deflect',  n: 3, form: 'line',    speed: 48,  gap: 0.7 },
-      { at: 12.9, kind: 'eel',      n: 3, form: 'trail',   speed: 88,  gap: 0.34 },
-      { at: 27.0, kind: 'miniboss', n: 2, form: 'line',    speed: 58,  gap: 0.5 },
-      { at: 27.5, kind: 'mbPrism',  n: 1, form: 'line',    speed: 56,  gap: 0.5, lane: 0.5 }
+      { at: 1.5,  kind: 'torpedo', n: 4, form: 'column', speed: 250, gap: 0.30 },
+      { at: 5.0,  kind: 'eel',     n: 3, form: 'line',   speed: 84,  gap: 0.44 },
+      { at: 8.5,  kind: 'torpedo', n: 6, form: 'sides',  speed: 272, gap: 0.22 },
+      { at: 12.0, kind: 'eel',     n: 4, form: 'arc',    speed: 88,  gap: 0.36 },
+      { at: 15.5, kind: 'torpedo', n: 6, side: 'left',  gap: 0.16 },   // 高速从左侧掠过
+      { at: 19.0, kind: 'eel',     n: 5, form: 'sides',  speed: 92,  gap: 0.32 },
+      { at: 22.5, kind: 'torpedo', n: 7, form: 'column', speed: 288, gap: 0.18 },
+      { at: 26.0, kind: 'eel',     n: 5, form: 'diamond', speed: 90, gap: 0.34 },
+      { at: 29.5, kind: 'torpedo', n: 6, form: 'wave',   speed: 270, gap: 0.20 },
+      { at: 32.0, kind: 'miniboss', n: 2, form: 'line',  speed: 58,  gap: 0.5 }
     ]
   },
   {
@@ -655,36 +770,39 @@ const LEVELS = [
     sub: 'STAGE 4 · ORBITAL WRECK',
     bg: 'bg4',
     accent: '#b98cff',
-    density: 1.58,
+    density: 1.62,
     boss: 'boss4',
     bossName: '轨道堡垒',
     support: null,
     bossHp: 4200,
+    hint: '追踪蜂群 · 正面护盾',
     // 轨道残骸：失重，飘得慢、摆得大；两份补给在残骸之间来回弹
     supply: [
       { at: 6,  kind: 'P', from: 'top', speed: 58, sway: 46 },
-      { at: 14, kind: 'W', from: 'top', speed: 58, sway: 46 },
-      { at: 22, kind: 'P', from: 'rise', speed: 58, sway: 40 },
-      { at: 30, kind: 'O', from: 'bounce', speed: 58 },
+      { at: 13, kind: 'W', from: 'top', speed: 58, sway: 46 },
+      { at: 21, kind: 'P', from: 'rise', speed: 58, sway: 40 },
+      { at: 29, kind: 'O', from: 'bounce', speed: 58 },
       { ev: 'miniboss', delay: 1.4, kind: 'P', from: 'bounce' }
     ],
+    /* 三个新单位各自考一个习惯：
+     *   drone   追着玩家跑 —— 不能再"站桩输出"，得边走边打
+     *   shield  正面只吃 15% 伤害 —— 必须绕到侧后方
+     *   looper  到底部调头爬升 —— 机尾第一次变成危险方向
+     * 冲角型小 BOSS 放在末尾单只出场：它是唯一会主动撞上来的单位，
+     * 和两只普通小 BOSS 混在一起出场时，玩家根本分不清哪个在俯冲。 */
     waves: [
-      { at: 1.5,  kind: 'drone',     n: 8,  form: 'arc',    speed: 140, gap: 0.10 },
-      { at: 12.2, kind: 'drone',    n: 7,  side: 'right', gap: 0.12 },   // 从右侧切入，进场后追玩家
-      { at: 5.8,  kind: 'shield',    n: 2,  form: 'line',   speed: 60,  gap: 0.9 },
-      { at: 10.2, kind: 'kamikaze',  n: 5,  form: 'sides',  speed: 160, gap: 0.24 },
-      { at: 14.4, kind: 'drone',     n: 10, form: 'vee',    speed: 150, gap: 0.08 },
-      { at: 18.6, kind: 'shield',    n: 3,  form: 'arc',    speed: 65,  gap: 0.7 },
-      { at: 23.0, kind: 'kamikaze',  n: 7,  form: 'line',   speed: 170, gap: 0.20 },
-      { at: 27.4, kind: 'drone',     n: 12, form: 'line',   speed: 160, gap: 0.06 },
-      { at: 32.2, kind: 'shield',    n: 3,  form: 'sides',  speed: 70,  gap: 0.6 },
-      { at: 36.8, kind: 'drone',    n: 10, form: 'diamond', speed: 150, gap: 0.09 },
-      { at: 41.2, kind: 'kamikaze', n: 6,  form: 'wave',    speed: 165, gap: 0.22 },
-      { at: 15.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 300 },
-      { at: 16.0, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
-      { at: 30.0, kind: 'looper',   n: 5,  form: 'vee',     speed: 118, gap: 0.32 },
-      { at: 20.0, kind: 'sniper',   n: 3,  form: 'sides',   speed: 60,  gap: 0.75 },
-      { at: 34.0, kind: 'drone',    n: 10, form: 'grid',    speed: 150, gap: 0.10 }
+      { at: 1.5,  kind: 'looper', n: 3, form: 'line',   speed: 106, gap: 0.34 },
+      { at: 5.0,  kind: 'drone',  n: 6, form: 'arc',    speed: 138, gap: 0.10 },
+      { at: 9.0,  kind: 'shield', n: 2, form: 'line',   speed: 58,  gap: 0.9 },
+      { at: 12.5, kind: 'drone',  n: 7, form: 'vee',    speed: 146, gap: 0.08 },
+      { at: 16.0, kind: 'looper', n: 4, side: 'left',  gap: 0.14 },   // 侧向切入后落到下方再爬回来
+      { at: 19.5, kind: 'shield', n: 3, form: 'arc',    speed: 64,  gap: 0.7 },
+      { at: 23.0, kind: 'drone',  n: 8, form: 'diamond', speed: 150, gap: 0.07 },
+      { at: 26.5, kind: 'looper', n: 4, form: 'vee',    speed: 116, gap: 0.28 },
+      { at: 30.0, kind: 'shield', n: 3, form: 'sides',  speed: 68,  gap: 0.6 },
+      { at: 33.0, kind: 'drone',  n: 7, form: 'grid',   speed: 152, gap: 0.09 },
+      { at: 34.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 290 },
+      { at: 34.8, kind: 'mbRam',    n: 1, form: 'line', speed: 60,  gap: 0.28, lane: 0.5 }
     ]
   },
   {
@@ -693,38 +811,38 @@ const LEVELS = [
     sub: 'STAGE 5 · CORE REACTOR',
     bg: 'bg5',
     accent: '#ff7a4d',
-    density: 1.66,
+    density: 1.74,
     boss: 'boss5',
     bossName: '熔核核心',
     support: 'mirror',
-    bossHp: 5200,
+    bossHp: 5600,
+    bossRate: 0.97,
+    hint: '喷火机 · 镜像机 · 悬停水母',
     // 熔核母舰：反应堆热流全往上走，补给全从底部升上来；顶上碰壁再落回来一份激光保险
     supply: [
-      { at: 6,  kind: 'P', from: 'rise' },
-      { at: 13, kind: 'P', from: 'rise' },
-      { at: 21, kind: 'W', from: 'riseBounce' },
-      { at: 29, kind: 'B', from: 'rise' },
+      { at: 5,  kind: 'P', from: 'rise' },
+      { at: 12, kind: 'P', from: 'rise' },
+      { at: 20, kind: 'W', from: 'riseBounce' },
+      { at: 28, kind: 'B', from: 'rise' },
       { ev: 'miniboss', delay: 1.4, kind: 'L', from: 'rise' }
     ],
+    /* 本关的基调是"慢而厚"：heavy 155 血、jelly 悬停不走、mirror 会复制你的火力。
+     * 全是慢速单位时会犯困，所以用 flame（喷火、射速快）和中段密集的 flame 波
+     * 把节奏顶起来——两种速度交替，才不会变成打靶场。 */
     waves: [
-      { at: 1.5,  kind: 'flame',     n: 3,  form: 'line',   speed: 90,  gap: 0.44 },
-      { at: 8.4,  kind: 'flame',    n: 6,  side: 'left',  gap: 0.16 },   // 从左侧切入（6 架）
-      { at: 17.2, kind: 'kamikaze', n: 5,  side: 'right', gap: 0.13, arc: true },  // 弧线：右下 → 右上
-      { at: 6.0,  kind: 'mirror',    n: 4,  form: 'sides',  speed: 95,  gap: 0.36 },
-      { at: 10.4, kind: 'heavy',     n: 2,  form: 'line',   speed: 45,  gap: 1.2 },
-      { at: 15.0, kind: 'flame',     n: 5,  form: 'arc',    speed: 95,  gap: 0.30 },
-      { at: 19.2, kind: 'mirror',    n: 6,  form: 'vee',    speed: 100, gap: 0.22 },
-      { at: 23.6, kind: 'heavy',     n: 2,  form: 'sides',  speed: 50,  gap: 1.0 },
-      { at: 28.2, kind: 'flame',     n: 6,  form: 'line',   speed: 100, gap: 0.26 },
-      { at: 33.0, kind: 'mirror',    n: 8,  form: 'arc',    speed: 105, gap: 0.18 },
-      { at: 37.6, kind: 'flame',  n: 6, form: 'pincer',  speed: 95,  gap: 0.28 },
-      { at: 42.0, kind: 'mirror', n: 7, form: 'diamond', speed: 100, gap: 0.20 },
-      { at: 12.5, kind: 'looper',  n: 5, form: 'vee',     speed: 120, gap: 0.28 },
-      { at: 27.0, kind: 'riser',   n: 4, form: 'line',    speed: 145, gap: 0.35 },
-      { at: 18.0, kind: 'deflect', n: 3, form: 'line',    speed: 48,  gap: 0.6 },
-      { at: 25.0, kind: 'mirror',  n: 8, form: 'cross',   speed: 102, gap: 0.20 },
-      { at: 22.8, kind: 'miniboss', n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.26 },
-      { at: 23.2, kind: 'mbSniper', n: 1, form: 'line',   speed: 56,  gap: 0.5, lane: 0.74 }
+      { at: 1.5,  kind: 'flame',  n: 4, form: 'line',   speed: 88,  gap: 0.42 },
+      { at: 5.0,  kind: 'jelly',  n: 2, form: 'sides',  speed: 50,  gap: 0.9 },
+      { at: 8.5,  kind: 'mirror', n: 4, form: 'sides',  speed: 94,  gap: 0.36 },
+      { at: 12.0, kind: 'heavy',  n: 2, form: 'line',   speed: 44,  gap: 1.2 },
+      { at: 15.5, kind: 'flame',  n: 6, form: 'arc',    speed: 94,  gap: 0.30 },
+      { at: 19.0, kind: 'jelly',  n: 3, form: 'line',   speed: 54,  gap: 0.8 },
+      { at: 22.5, kind: 'mirror', n: 7, form: 'vee',    speed: 98,  gap: 0.22 },
+      { at: 26.0, kind: 'heavy',  n: 2, form: 'sides',  speed: 48,  gap: 1.0 },
+      { at: 29.5, kind: 'flame',  n: 7, form: 'line',   speed: 100, gap: 0.26 },
+      { at: 33.0, kind: 'mirror', n: 8, form: 'cross',  speed: 102, gap: 0.20 },
+      { at: 36.0, kind: 'flame',  n: 7, side: 'left',   gap: 0.16 },   // 从左侧切入：喷火机贴边压过来
+      { at: 37.0, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 300 },
+      { at: 37.3, kind: 'mbSniper', n: 1, form: 'line', speed: 56,  gap: 0.28, lane: 0.5 }
     ]
   },
   {
@@ -733,36 +851,41 @@ const LEVELS = [
     sub: 'STAGE 6 · AURORA CITADEL',
     bg: 'bg6',
     accent: '#7dfff0',
-    density: 1.70,
+    density: 1.88,
     boss: 'boss6',
     bossName: '极光母舰',
-    bossHp: 5800,
+    bossHp: 6300,
+    bossRate: 0.95,
+    hint: '潜伏者 · 狙击机 · 重型浮雷',
     // 极光堡垒：极光像飘带一样左右摆，道具跟着摆；有一份从底部升起再落到顶盖
     supply: [
       { at: 6,  kind: 'P', from: 'top', sway: 52 },
-      { at: 14, kind: 'W', from: 'bounce', sway: 48 },
-      { at: 22, kind: 'P', from: 'rise', sway: 52 },
-      { at: 30, kind: 'H', from: 'riseBounce', sway: 40 },
+      { at: 13, kind: 'W', from: 'bounce', sway: 48 },
+      { at: 21, kind: 'P', from: 'rise', sway: 52 },
+      { at: 29, kind: 'H', from: 'riseBounce', sway: 40 },
       { ev: 'miniboss', delay: 1.4, kind: 'O', from: 'bounce' }
     ],
     support: 'jelly',
+    /* 本关把"看警示"推到前台：
+     *   riser  从屏幕底部升起，起之前底部有红柱警示
+     *   sniper 打慢起快收的狙击弹，蓄力期有收缩红环
+     *   mineH  浮雷的放大版，爆散 16 发
+     * 三者都在考"提前读画面"，所以段落之间留了 3.5 秒的空档，
+     * 让玩家有机会把视线从弹幕挪到底边/敌机机腹上。 */
     waves: [
-      { at: 1.5,  kind: 'drone',  n: 8,  form: 'arc',     speed: 145, gap: 0.10 },
-      { at: 12.8, kind: 'fighter',  n: 8,  side: 'right', gap: 0.12 },   // 从右侧切入（8 架）
-      { at: 6.0,  kind: 'shield', n: 2,  form: 'line',    speed: 60,  gap: 0.8 },
-      { at: 10.5, kind: 'eel',    n: 4,  form: 'wave',    speed: 95,  gap: 0.35 },
-      { at: 15.0, kind: 'jelly',  n: 3,  form: 'sides',   speed: 52,  gap: 0.7 },
-      { at: 19.5, kind: 'drone',  n: 10, form: 'diamond', speed: 150, gap: 0.08 },
-      { at: 24.0, kind: 'shield', n: 3,  form: 'pincer',  speed: 65,  gap: 0.6 },
-      { at: 28.5, kind: 'eel',    n: 6,  form: 'vee',     speed: 100, gap: 0.28 },
-      { at: 33.0, kind: 'jelly',  n: 4,  form: 'line',    speed: 55,  gap: 0.65 },
-      { at: 37.5, kind: 'drone',  n: 12, form: 'wave',    speed: 155, gap: 0.07 },
-      { at: 42.0, kind: 'shield', n: 4,  form: 'arc',     speed: 70,  gap: 0.55 },
-      { at: 21.5, kind: 'miniboss', n: 2, form: 'line',   speed: 58,  gap: 0.28, hp: 280 },
-      { at: 21.9, kind: 'mbPrism',  n: 1, form: 'line',   speed: 56,  gap: 0.28, lane: 0.5 },
-      { at: 26.2, kind: 'sniper',   n: 3, form: 'arc',    speed: 60,  gap: 0.7 },
-      { at: 30.5, kind: 'eel',      n: 6, form: 'cross',  speed: 98,  gap: 0.26 },
-      { at: 22.0, kind: 'fighter',  n: 6,  diag: 'rtl', gap: 0.13 },   // 对角：右下 → 左上
+      { at: 1.5,  kind: 'riser',  n: 5, form: 'line',   speed: 126, gap: 0.55 },
+      { at: 5.0,  kind: 'sniper', n: 3, form: 'sides',  speed: 58,  gap: 0.8 },
+      { at: 8.5,  kind: 'mineH',  n: 4, form: 'arc',    speed: 34,  gap: 0.55 },
+      { at: 12.0, kind: 'riser',  n: 5, form: 'sides',  speed: 134, gap: 0.42 },
+      { at: 15.5, kind: 'sniper', n: 4, form: 'arc',    speed: 60,  gap: 0.7 },
+      { at: 19.0, kind: 'mineH',  n: 5, form: 'line',   speed: 36,  gap: 0.5 },
+      { at: 22.5, kind: 'riser',  n: 5, form: 'line',   speed: 140, gap: 0.35 },
+      { at: 26.0, kind: 'sniper', n: 4, form: 'sides',  speed: 62,  gap: 0.65 },
+      { at: 29.5, kind: 'mineH',  n: 6, form: 'arc',    speed: 38,  gap: 0.45 },
+      { at: 33.0, kind: 'riser',  n: 6, form: 'sides',  speed: 144, gap: 0.32 },
+      { at: 36.5, kind: 'sniper', n: 5, form: 'arc',    speed: 64,  gap: 0.6 },
+      { at: 39.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 310 },
+      { at: 39.8, kind: 'mbPrism',  n: 1, form: 'line', speed: 56,  gap: 0.28, lane: 0.5 }
     ]
   },
   {
@@ -771,10 +894,12 @@ const LEVELS = [
     sub: 'STAGE 7 · VOID THRONE',
     bg: 'bg7',
     accent: '#ffc460',
-    density: 1.80,
+    density: 2.04,
     boss: 'boss7',
     bossName: '虚空之主',
-    bossHp: 6800,
+    bossHp: 7500,
+    bossRate: 0.93,
+    hint: '自杀机 · 偏折机',
     // 虚空王座：几乎没有重量，飘得最慢；环绕机从底部浮到王座边缘再落回来
     supply: [
       { at: 6,  kind: 'P', from: 'top', speed: 54, sway: 38 },
@@ -784,24 +909,28 @@ const LEVELS = [
       { ev: 'miniboss', delay: 1.4, kind: 'B', from: 'top' }
     ],
     support: null,
+    /* 前六关都是"敌人从上面下来打你"，本关换两个方向：
+     *   kamikaze 直接朝机身撞（不再是躲弹幕，是躲机体）
+     *   deflect  正面把子弹拨回去（第一次出现"越打越没用"的怪）
+     * deflect 固定编在 kamikaze 前面 3.5 秒：先让它替后面的自杀机挡掉一路火力，
+     * 玩家才会意识到"这家伙是保护伞"，而不是"又一个打不动的肉"。
+     * 双小 BOSS 用一冲一狙的组合：一个逼你走位，一个逼你保持移动，不能站定输出。 */
     waves: [
-      { at: 1.5,  kind: 'kamikaze', n: 5,  form: 'line',    speed: 160, gap: 0.24 },
-      { at: 12.8, kind: 'kamikaze', n: 5,  side: 'left',  gap: 0.15 },   // 从左侧切入后直扑
-      { at: 20.5, kind: 'diver',    n: 4,  side: 'right', gap: 0.15, arc: true },  // 弧线：右下 → 右上
-      { at: 6.0,  kind: 'mirror',   n: 5,  form: 'sides',   speed: 100, gap: 0.30 },
-      { at: 10.5, kind: 'heavy',    n: 2,  form: 'line',    speed: 48,  gap: 1.0 },
-      { at: 15.0, kind: 'flame',    n: 6,  form: 'arc',     speed: 100, gap: 0.25 },
-      { at: 19.5, kind: 'kamikaze', n: 8,  form: 'wave',    speed: 170, gap: 0.20 },
-      { at: 24.0, kind: 'mirror',   n: 7,  form: 'diamond', speed: 105, gap: 0.22 },
-      { at: 28.5, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 52,  gap: 0.9 },
-      { at: 33.0, kind: 'flame',    n: 8,  form: 'vee',     speed: 105, gap: 0.22 },
-      { at: 37.5, kind: 'kamikaze', n: 10, form: 'diamond', speed: 175, gap: 0.16 },
-      { at: 42.0, kind: 'mirror',   n: 9,  form: 'wave',    speed: 110, gap: 0.18 },
-      { at: 17.5, kind: 'miniboss', n: 2, form: 'line',     speed: 58,  gap: 0.28, hp: 310 },
-      { at: 17.9, kind: 'mbRam',    n: 1, form: 'line',     speed: 60,  gap: 0.28, lane: 0.5 },
-      { at: 27.0, kind: 'deflect',  n: 3, form: 'line',     speed: 48,  gap: 0.6 },
-      { at: 31.5, kind: 'kamikaze', n: 9, form: 'grid',     speed: 172, gap: 0.10 },
-      { at: 23.5, kind: 'sniper',   n: 3, form: 'sides',    speed: 62,  gap: 0.7 }
+      { at: 1.5,  kind: 'kamikaze', n: 5, form: 'line',    speed: 160, gap: 0.24 },
+      { at: 5.0,  kind: 'mirror',   n: 5, form: 'sides',   speed: 100, gap: 0.30 },
+      { at: 8.5,  kind: 'flame',    n: 5, form: 'arc',     speed: 100, gap: 0.25 },
+      { at: 12.0, kind: 'deflect',  n: 2, form: 'line',    speed: 48,  gap: 0.6 },
+      { at: 15.5, kind: 'kamikaze', n: 7, form: 'wave',    speed: 168, gap: 0.20 },
+      { at: 19.0, kind: 'heavy',    n: 2, form: 'line',    speed: 48,  gap: 1.0 },
+      { at: 22.5, kind: 'mirror',   n: 5, form: 'diamond', speed: 104, gap: 0.22 },
+      { at: 26.0, kind: 'deflect',  n: 3, form: 'line',    speed: 50,  gap: 0.6 },
+      { at: 29.5, kind: 'kamikaze', n: 5, side: 'right', gap: 0.13 },   // 从右侧切入后直扑机身
+      { at: 33.0, kind: 'flame',    n: 6, form: 'vee',     speed: 104, gap: 0.22 },
+      { at: 36.5, kind: 'heavy',    n: 3, form: 'pincer',  speed: 52,  gap: 0.9 },
+      { at: 40.0, kind: 'kamikaze', n: 6, form: 'diamond', speed: 174, gap: 0.16 },
+      { at: 42.0, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 320, lane: 0.18 },
+      { at: 42.3, kind: 'mbRam',    n: 1, form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
+      { at: 42.3, kind: 'mbSniper', n: 1, form: 'line',    speed: 56,  gap: 0.28, lane: 0.82 }
     ]
   },
   {
@@ -810,35 +939,47 @@ const LEVELS = [
     sub: 'STAGE 8 · MITOSIS NEST',
     bg: 'bg8',
     accent: '#b2ff60',
-    density: 1.88,
+    density: 2.20,
     boss: 'boss8',
     bossName: '裂殖之核',
-    bossHp: 7600,
+    bossHp: 8600,
+    bossRate: 0.89,
+    hint: '精英潮 · 蛇形单位',
     // 裂殖之巢：巢体脉动把补给从底部挤上来，越打越往上涌
     supply: [
       { at: 6,  kind: 'P', from: 'rise' },
-      { at: 12, kind: 'P', from: 'rise' },
-      { at: 19, kind: 'W', from: 'riseBounce' },
-      { at: 27, kind: 'H', from: 'rise' },
+      { at: 13, kind: 'P', from: 'rise' },
+      { at: 20, kind: 'W', from: 'riseBounce' },
+      { at: 28, kind: 'H', from: 'rise' },
       { ev: 'miniboss', delay: 1.4, kind: 'L', from: 'rise' }
     ],
     support: 'kamikaze',
+    /* 本关不引入新杂兵，改由"节奏"制造新鲜感：
+     * 四种旧机型（蜂群/自杀机/喷火/镜像）全部上阵，段与段之间不超 3.5 秒，
+     * 密度是全场最高的一关——它考的是"能不能在高密度下持续走位"，不是新知识。
+     * 压轴给**单条蛇**：第 9 关是双蛇，这里必须先教一次"打头才算击杀、
+     * 剪身体会让它暴走"，否则终局关两条蛇同时上来时没有学习窗口。 */
     waves: [
-      { at: 1.5,  kind: 'kamikaze', n: 6,  form: 'line',    speed: 168, gap: 0.20 },
-      { at: 11.5, kind: 'mirror',   n: 8,  side: 'right', gap: 0.13 },   // 从右侧切入（8 架）
-      { at: 5.5,  kind: 'drone',    n: 10, form: 'diamond', speed: 152, gap: 0.08 },
-      { at: 9.5,  kind: 'flame',    n: 7,  form: 'arc',     speed: 102, gap: 0.22 },
-      { at: 13.5, kind: 'mirror',   n: 7,  form: 'sides',   speed: 104, gap: 0.24 },
-      { at: 17.5, kind: 'kamikaze', n: 9,  form: 'wave',    speed: 172, gap: 0.16 },
-      { at: 21.5, kind: 'drone',    n: 12, form: 'diamond', speed: 158, gap: 0.07 },
-      { at: 25.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 320 },
-      { at: 25.9, kind: 'mbPrism',  n: 1,  form: 'line',    speed: 56,  gap: 0.28, lane: 0.5 },
-      { at: 22.5, kind: 'sniper',   n: 3,  form: 'sides',   speed: 62,  gap: 0.65 },
-      { at: 36.0, kind: 'flame',    n: 8,  form: 'trail',   speed: 106, gap: 0.16 },
-      { at: 30.0, kind: 'flame',    n: 9,  form: 'pincer',  speed: 106, gap: 0.20 },
-      { at: 34.5, kind: 'mirror',   n: 9,  form: 'diamond', speed: 108, gap: 0.18 },
-      { at: 39.0, kind: 'kamikaze', n: 11, form: 'diamond', speed: 178, gap: 0.14 },
-      { at: 19.5, kind: 'kamikaze', n: 5,  diag: 'ltr', gap: 0.13 },   // 对角：左下 → 右上
+      { at: 1.5,  kind: 'drone',    n: 6, form: 'diamond', speed: 150, gap: 0.08 },
+      { at: 5.0,  kind: 'kamikaze', n: 4, form: 'wave',    speed: 166, gap: 0.22 },
+      { at: 8.5,  kind: 'flame',    n: 4, form: 'arc',     speed: 102, gap: 0.22 },
+      { at: 12.0, kind: 'mirror',   n: 4, form: 'sides',   speed: 104, gap: 0.24 },
+      { at: 15.5, kind: 'drone',    n: 7, form: 'diamond', speed: 156, gap: 0.07 },
+      { at: 19.0, kind: 'kamikaze', n: 5, form: 'pincer',  speed: 170, gap: 0.18 },
+      { at: 22.5, kind: 'flame',    n: 5, form: 'trail',   speed: 106, gap: 0.16 },
+      { at: 26.0, kind: 'mirror',   n: 5, form: 'diamond', speed: 108, gap: 0.18 },
+      { at: 29.5, kind: 'drone',    n: 5, diag: 'ltr',   gap: 0.12 },   // 对角：左下 → 右上
+      { at: 33.0, kind: 'kamikaze', n: 6, form: 'diamond', speed: 174, gap: 0.14 },
+      { at: 36.5, kind: 'flame',    n: 5, form: 'pincer',  speed: 106, gap: 0.20 },
+      { at: 40.0, kind: 'mirror',   n: 6, form: 'wave',    speed: 110, gap: 0.18 },
+      // 中段小 BOSS：波次放到一半时插一组，避免整关只有"蛇"一个记忆点；
+      // 和末段蛇错开 21 秒，玩家有两段明确的"停下来打大目标"的窗口
+      { at: 23.5, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 330, lane: 0.32 },
+      { at: 23.8, kind: 'mbPrism',  n: 1, form: 'line',    speed: 56,  gap: 0.28, lane: 0.68 },
+      /* 第三只：小 BOSS 同屏上限就是 3，三路分 Lane 才算"能同时应付"，
+       * 不给 lane 会挤在中线互相掩护，玩家连一个都打不穿。 */
+      { at: 24.1, kind: 'mbSniper', n: 1, form: 'line',    speed: 56,  gap: 0.28, lane: 0.88 },
+      { at: 45.0, kind: 'snake',    n: 1 }
     ]
   },
   {
@@ -847,42 +988,52 @@ const LEVELS = [
     sub: 'STAGE 9 · FINAL RING',
     bg: 'bg9',
     accent: '#b4beff',
-    density: 2.00,
+    density: 2.38,
     boss: 'boss9',
     bossName: '终焉星环',
-    bossHp: 9000,
+    bossHp: 10400,
+    bossRate: 0.84,
+    hint: '全机型混编 · 双蛇',
     // 终焉星环：星环上下两半同时投放，同一时刻一份自上落下、一份自下升起
     supply: [
       { at: 7,  kind: 'P', from: 'top',  x: 0.28 },
       { at: 7,  kind: 'P', from: 'rise', x: 0.72 },
       { at: 16, kind: 'W', from: 'top',  x: 0.72 },
       { at: 16, kind: 'W', from: 'rise', x: 0.28 },
-      { at: 25, kind: 'B', from: 'bounce' },
-      { at: 32, kind: 'O', from: 'riseBounce' },
+      { at: 26, kind: 'B', from: 'bounce' },
+      { at: 35, kind: 'O', from: 'riseBounce' },
       { ev: 'miniboss', delay: 1.4, kind: 'B', from: 'bounce' }
     ],
     phaseCuts: [0.8, 0.6, 0.4, 0.2],   // 五阶段
     support: null,
+    /* 终局关：前面八关的所有机制按"每段一个主题"轮着来，中间不留空地。
+     * 顺序刻意排成"盾 → 重装 → 摆尾 → 自杀 → 镜像 → 悬停 → 偏折 → 重装 → 蜂群……"，
+     * 让连续两段永远不是同一种应对方式（刚学会绕后打盾，下一段就要躲机体）。
+     * 压轴双蛇：单条已打过一次，这里是"两条对向"的最终考核。 */
     waves: [
       { at: 1.5,  kind: 'shield',   n: 3,  form: 'line',    speed: 66,  gap: 0.6 },
-      { at: 11.5, kind: 'shield',   n: 6,  side: 'left',  gap: 0.17 },   // 从左侧贴墙切入（6 架）
-      { at: 17.2, kind: 'kamikaze', n: 5,  side: 'right', gap: 0.13, arc: true },  // 弧线：右下 → 右上
-      { at: 5.5,  kind: 'heavy',    n: 2,  form: 'line',    speed: 50,  gap: 1.0 },
-      { at: 9.5,  kind: 'eel',      n: 6,  form: 'wave',    speed: 100, gap: 0.26 },
-      { at: 13.5, kind: 'kamikaze', n: 8,  form: 'pincer',  speed: 175, gap: 0.18 },
-      { at: 17.5, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 340 },
-      { at: 17.9, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
-      { at: 22.0, kind: 'mirror',   n: 9,  form: 'diamond', speed: 110, gap: 0.18 },
-      { at: 26.5, kind: 'jelly',    n: 5,  form: 'arc',     speed: 54,  gap: 0.6 },
-      { at: 31.0, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 54,  gap: 0.8 },
-      { at: 35.5, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
-      { at: 40.0, kind: 'drone',    n: 14, form: 'diamond', speed: 162, gap: 0.06 },
-      { at: 28.5, kind: 'deflect',  n: 3,  form: 'line',    speed: 48,  gap: 0.6 },
-      { at: 29.2, kind: 'sniper',   n: 3,  form: 'trail',   speed: 62,  gap: 0.6 },
+      { at: 5.0,  kind: 'heavy',    n: 2,  form: 'line',    speed: 50,  gap: 1.0 },
+      { at: 8.5,  kind: 'eel',      n: 5,  form: 'wave',    speed: 100, gap: 0.26 },
+      { at: 12.0, kind: 'kamikaze', n: 6,  form: 'pincer',  speed: 175, gap: 0.18 },
+      { at: 15.5, kind: 'mirror',   n: 6,  form: 'diamond', speed: 110, gap: 0.18 },
+      { at: 19.0, kind: 'jelly',    n: 4,  form: 'arc',     speed: 54,  gap: 0.6 },
+      { at: 22.5, kind: 'deflect',  n: 3,  form: 'line',    speed: 48,  gap: 0.6 },
+      { at: 26.0, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 54,  gap: 0.8 },
+      { at: 29.5, kind: 'drone',    n: 11, form: 'diamond', speed: 162, gap: 0.06 },
+      { at: 33.0, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
+      { at: 36.5, kind: 'sniper',   n: 3,  side: 'right',  gap: 0.7 },   // 侧向滑入后悬停蓄力
+      { at: 40.0, kind: 'kamikaze', n: 7,  form: 'diamond', speed: 178, gap: 0.14 },
+      { at: 43.5, kind: 'eel',      n: 7,  form: 'cross',   speed: 104, gap: 0.24 },
+      // 中段小 BOSS：和前八关一样"波次过半来一波"，双蛇仍然独占最后 10 秒
+      { at: 24.0, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 360 },
+      { at: 24.3, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
+      /* 尾段再加一只：终局关不能"打完中段小 BOSS 就只剩躲弹"，
+       * 41 秒这只把压力续到双蛇登场，血量用普通 380（不用棱镜），
+       * 免得它拖着 520 血活到 50 秒和双蛇叠在一起。 */
+      { at: 41.0, kind: 'miniboss', n: 1,  form: 'line',    speed: 58,  gap: 0.28, hp: 380, lane: 0.5 },
 
-      // 第二轮小 BOSS：双蛇对向游走（各 1250 头血 / 7 节 × 160，单条射速降 42%）
-      { at: 43.5, kind: 'snake',    n: 2,  form: 'line' },
-      { at: 22.5, kind: 'torpedo',  n: 6,  diag: 'rtl', gap: 0.10 },   // 对角：右下 → 左上
+      // 压轴：双蛇对向游走（各 1250 头血 / 7 节 × 160，单条射速降 42%）
+      { at: 50.0, kind: 'snake',    n: 2 }
     ]
   }
 ];

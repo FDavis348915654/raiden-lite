@@ -60,16 +60,16 @@ def run(page, mode, profile):
             { x: VIEW.w / 2 + (i === 0 ? -54 : 54), y: 770, fireT: 0.2, t: 0 }));
           if (profile === 'rookie') {
             // 下限：全程只有一把 Lv1 主武器，不掉道具也不吃僚机
-            p.power = 1; p.weapons = [0]; p.slotT = [0]; p.options = [];
+            p.weapons = [0]; p.lv = [1]; p.slotT = [0]; p.options = [];
           } else if (profile === 'normal') {
-            // 典型：火力随关卡自然成长，第 6 关起满级 + 双僚机
-            if (id <= 2) { p.power = 1; p.weapons = [0]; }
-            else if (id <= 5) { p.power = 2; p.weapons = [0, 1]; }
-            else { p.power = 3; p.weapons = [0, 2, 5]; }
+            // 典型：火力随关卡自然成长，第 6 关起满级（5 级）+ 双僚机
+            if (id <= 2) { p.weapons = [0]; p.lv = [2]; }
+            else if (id <= 5) { p.weapons = [0, 1]; p.lv = [3, 3]; }
+            else { p.weapons = [0, 2, 5]; p.lv = [5, 5, 5]; }
             p.slotT = p.weapons.map(() => 0);
             p.options = mkOpt(id <= 2 ? 0 : id <= 5 ? 1 : 2);
           } else {
-            p.power = 3; p.weapons = [0, 2, 6]; p.slotT = [0, 0, 0]; p.options = mkOpt(2);
+            p.weapons = [0, 2, 6]; p.lv = [5, 5, 5]; p.slotT = [0, 0, 0]; p.options = mkOpt(2);
           }
 
           let spawned = 0, killed = 0, escaped = 0, peak = 0;
@@ -157,7 +157,7 @@ def main():
             for mode in ('old', 'new'):
                 for profile in ('rookie', 'normal', 'veteran'):
                     rows = run(page, mode, profile)
-                    name = {'rookie': '下限 Lv1 单槽', 'normal': '典型 随关卡成长', 'veteran': '熟练 Lv3 三槽'}[profile]
+                    name = {'rookie': '下限 Lv1 单槽', 'normal': '典型 随关卡成长', 'veteran': '熟练 Lv5 三槽'}[profile]
                     show(('改前' if mode == 'old' else '改后') + ' / ' + name, rows)
 
             print('\n页面错误:', errs[:5] if errs else '无')

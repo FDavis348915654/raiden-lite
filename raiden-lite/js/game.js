@@ -42,10 +42,13 @@ class Game {
     this.player = new Player();
     this.boss = new Boss();
     this.bullets = Array.from({ length: 680 }, () => new Bullet());
-    this.enemies = Array.from({ length: 90 }, () => new Enemy());
+    /* 池子 90 → 120：3.28 后期密度的上限把同屏峰值推到 70~80，
+     * 池子见底时 _spawnEnemy 会静默少放怪，表现为"这一波少了三架"。 */
+    this.enemies = Array.from({ length: 120 }, () => new Enemy());
     this.particles = Array.from({ length: 520 }, () => new Particle());
-    // 32 个：关卡定时补给 + 敌机掉落 + BOSS 爆一地会同时占位，24 个开始出现"掉了但没生成"
-    this.pickups = Array.from({ length: 32 }, () => new Pickup());
+    // 32 → 48：3.29.0 加了每 gap 秒的四周补给，连同关卡定时补给、敌机掉落、
+    // BOSS 爆一地会同时占位，32 个开始出现"掉了但没生成"。
+    this.pickups = Array.from({ length: 48 }, () => new Pickup());
 
     this.queue = [];
     this.snakes = [];                // 蛇形小 BOSS（数组：第 9 关双蛇，标题页也会读）
@@ -67,6 +70,7 @@ class Game {
     this.wpnSub = '';
     this.wpnColor = '#7fe0ff';
     this.supplyT = 9;
+    this.edgeT = 0;                  // 四周补给计时（见 _updateEdgeSupply）
     this.continues = CONTINUE.max;   // 本局剩余续关次数
     this.contT = 0;                  // 续关倒计时（>0 表示可以续）
     this.contToastT = 0;             // 续关成功的提示
@@ -293,7 +297,7 @@ class Game {
         clamp(p.x + off, 40, VIEW.w - 40),
         y - Math.abs(off) * 0.35,     // V 形排开，避免几个道具叠成一个
         k,
-        k === 'W' ? pick(unlockedWeapons(stageId)) : 0
+        k === 'W' ? pickWeaponIdx(stageId, p.weapons) : 0
       );
     }
     this._devToast('随机补给 ×' + n);
@@ -604,6 +608,9 @@ class Game {
     this.wpnSub = '';
     this.wpnColor = '#7fe0ff';
     this.supplyT = 9;
+    // 首份四周补给别等满一个 gap：关卡刚开 5 秒就有一件从边上飘进来，
+    // 玩家第一眼就能看到"这关会有东西从侧面来"，而不是打了半天才碰上
+    this.edgeT = edgeSupplyGap(this.level.id) - 5;
     if (!keepProgress) this.continues = CONTINUE.max;   // 只有全新一局才重置续关次数
     this.contT = 0;                  // 续关倒计时（>0 表示可以续）
     this.contToastT = 0;             // 续关成功的提示
@@ -822,8 +829,9 @@ class Game {
     this.player.invuln = Math.max(this.player.invuln, this.clearT + 0.5);
     this.player.canFire = false;          // 没有敌人了，停火让结算画面干净
     SFX.stageClear();
-    // 掉落奖励
-    for (let i = 0; i < 3; i++) this.spawnPickup(b.x + rand(-70, 70), b.y + rand(-30, 30), 'P');
+    // 掉落奖励：P 从 3 瓶降到 2 瓶。4 瓶就能把四把枪顶到满级，
+    // 每关结尾再白送 3 瓶的话，击杀掉落压得再低也没有意义。
+    for (let i = 0; i < 2; i++) this.spawnPickup(b.x + rand(-70, 70), b.y + rand(-30, 30), 'P');
     if (this.player.lives < 3) this.spawnPickup(b.x, b.y + 30, 'H');
   }
 
@@ -1199,9 +1207,9 @@ class Game {
   }
 
   /** 占用一个空槽：多出一种同时开火的武器 */
-  onWeaponAdded(p, idx) {
+  onWeaponAdded(p, idx, lv) {
     this.wpnTitle = WEAPONS[idx].name;
-    this.wpnSub = WEAPONS[idx].cn + ' · 槽位 ' + p.weapons.length + '/' + WEAPON_SLOTS +
+    this.wpnSub = WEAPONS[idx].cn + ' · LV' + (lv || 1) + ' · 槽位 ' + p.weapons.length + '/' + WEAPON_SLOTS +
       (p.weapons.length > 1 ? ' · 点武器槽换主武器' : '');
     this.wpnColor = WEAPONS[idx].color;
     this.wpnToastT = 1.8;
@@ -1217,10 +1225,11 @@ class Game {
     SFX.weaponSwitch();
   }
 
-  /** 已有同款武器但未满级 */
-  onWeaponDup(p, idx) {
+  /** 已有同款武器：这一把单独升一级 */
+  onWeaponDup(p, idx, lv) {
     this.wpnTitle = WEAPONS[idx].name;
-    this.wpnSub = '已装备 · 满级后再吃触发全弹发射';
+    this.wpnSub = 'LV' + lv + ' / ' + PLAYER.maxPower +
+      (lv >= PLAYER.maxPower ? ' · 满级，再吃触发全弹发射' : ' · 再吃同款继续升级');
     this.wpnColor = WEAPONS[idx].color;
     this.wpnToastT = 1.4;
   }
@@ -1366,17 +1375,22 @@ class Game {
     // 蛇身不掉落：一条蛇 8 节，每节都掉的话等于刷了 8 次道具
     if (e.kind === 'snakeBody') return;
     if (e.elite) {
-      const k1 = pick(['P', 'W', 'B']);
-      this.spawnPickup(e.x - 14, e.y, k1,
-        k1 === 'W' ? pick(unlockedWeapons(this.level.id)) : 0);
-      this.spawnPickup(e.x + 14, e.y, 'H');
+      /* 精英：3.29.1 起从"固定双掉落"改成"一份高价值 + 残血补 H"。
+       * 精英占刷新量 4%~21%，后期一关四十多只；每只都吐两件的话，
+       * 一关光是精英就刷上百件道具，普通击杀的掉率压到再低也看不出差别。
+       * P 的份额同时压到 1/6：它一瓶顶四瓶其他道具（四瓶就能全槽满级）。 */
+      const k1 = pick(['W', 'W', 'W', 'B', 'B']);
+      this.spawnPickup(e.x - 10, e.y, k1,
+        k1 === 'W' ? this._rollWeapon() : 0);
+      if (this.player.lives < 3) this.spawnPickup(e.x + 14, e.y, 'H');
       return;
     }
     const roll = Math.random();
-    for (const d of DROPS) {
+    // 掉率表按关卡过滤：前期不掉护盾/宽头弹这类"改变打法"的道具
+    for (const d of dropTable(this.level.id)) {
       if (roll < d.upto) {
         this.spawnPickup(e.x, e.y, d.kind,
-          d.kind === 'W' ? pick(unlockedWeapons(this.level.id)) : 0);
+          d.kind === 'W' ? this._rollWeapon() : 0);
         break;
       }
     }
@@ -1491,22 +1505,59 @@ class Game {
     while (q.length && this.stageT >= q[0].at) this.spawnSupply(q.shift().spec);
   }
 
+  /** 抽一把"这一瓶 W 是哪把枪"。加权逻辑见 config.pickWeaponIdx：
+   *  本关新解锁 ×6、未拥有 ×3、已拥有 ×1，保证解锁关一定见得到新枪。 */
+  _rollWeapon() {
+    const id = this.level ? this.level.id : ((this.levelIdx || 0) + 1);
+    return pickWeaponIdx(id, this.player.weapons);
+  }
+
   spawnSupply(spec) {
     const from = spec.from || 'top';
+    const kind = spec.kind || 'P';
+    const weapon = kind === 'W'
+      ? (spec.weapon === undefined ? this._rollWeapon() : spec.weapon)
+      : 0;
+    const speed = spec.speed || 78;
+
+    // 左右两条边：横穿整屏。走 dirX 而不是 dir，出界回收和反弹才不会互相打架
+    if (from === 'left' || from === 'right') {
+      const y = spec.y === undefined
+        ? rand(PLAY_TOP + 100, VIEW.h - 150)
+        : clamp(spec.y * VIEW.h, PLAY_TOP + 80, VIEW.h - 140);
+      this.spawnPickup(from === 'left' ? -22 : VIEW.w + 22, y, kind, weapon, {
+        dirX: from === 'left' ? 1 : -1,
+        sway: spec.sway === undefined ? 26 : spec.sway,
+        speed: speed
+      });
+      return;
+    }
+
     const isTop = from === 'top' || from === 'bounce';
     // x 省略时随机；给了 0~1 比例则按屏宽换算，用来摆"上下对开"这种呼应位
     const x = spec.x === undefined
       ? rand(56, VIEW.w - 56)
       : clamp(spec.x * VIEW.w, 48, VIEW.w - 48);
-    const kind = spec.kind || 'P';
-    const weapon = kind === 'W'
-      ? (spec.weapon === undefined ? pick(unlockedWeapons(this.level.id)) : spec.weapon)
-      : 0;
     this.spawnPickup(x, isTop ? -22 : VIEW.h + 24, kind, weapon, {
       dir: isTop ? 1 : -1,
       bounce: (from === 'bounce' || from === 'riseBounce') ? 1 : 0,
       sway: spec.sway || 0,
-      speed: spec.speed || 78
+      speed: speed
+    });
+  }
+
+  /* 四周补给：每 gap 秒从四条边随机送一份。跟关卡 supply 表的分工是
+   * "表负责主题时刻（深海要浮上来、峡谷要弹一下），这里负责底盘供给"。 */
+  _updateEdgeSupply(dt) {
+    this.edgeT += dt;
+    const id = this.level.id;
+    if (this.edgeT < edgeSupplyGap(id)) return;
+    this.edgeT = 0;
+    const from = pick(['top', 'bottom', 'left', 'right']);
+    this.spawnSupply({
+      from: from,
+      kind: pickEdgeSupply(id),
+      speed: rand(64, 84)
     });
   }
 
@@ -1665,6 +1716,7 @@ class Game {
       this.stageT += dt;
       this._updateWaves();
       this._updateSupply();
+      this._updateEdgeSupply(dt);
 
       this._trackMiniBoss();
       this._updateOutro(dt);
@@ -1692,11 +1744,14 @@ class Game {
       if (this.state === 'boss' && !this.boss.dead && !this.boss.enter) {
         this.supplyT -= dt;
         if (this.supplyT <= 0) {
-          // BOSS 血量翻倍后战斗更长，补给要跟上，否则中后期只能刮痧
-          this.supplyT = 7.0;
+          // BOSS 血量翻倍后战斗更长，补给要跟上，否则中后期只能刮痧。
+          // P 的占比 72% → 50% → 40%：BOSS 战真正缺的是"那把打不动的枪"的等级，
+          // 所以把空出来的权重给 W 比继续堆 P 更解决问题
+          this.supplyT = 8.0;
           const roll = Math.random();
-          const kind = roll < 0.72 ? 'P' : roll < 0.88 ? 'B' : 'H';
-          this.spawnPickup(rand(56, VIEW.w - 56), -18, kind);
+          const kind = roll < 0.40 ? 'P' : roll < 0.68 ? 'W' : roll < 0.88 ? 'B' : 'H';
+          this.spawnPickup(rand(56, VIEW.w - 56), -18, kind,
+            kind === 'W' ? this._rollWeapon() : 0);
         }
       }
     }
@@ -1865,7 +1920,7 @@ class Game {
     if (!e) return;
     // 精英变体：只在中小型机里出，大型机本身够硬不再强化
     const canElite = ELITE_KINDS.indexOf(q.kind) >= 0;
-    const elite = canElite && Math.random() < ELITE_CHANCE;
+    const elite = canElite && Math.random() < eliteChance(this.level.id);
 
     // 从屏幕底部来的单位：从画面外升起，并先给底部警告
     const fromBottom = BOTTOM_SPAWN.indexOf(q.kind) >= 0;
@@ -2817,7 +2872,13 @@ class Game {
         k.active = false;
         SFX.pickup();
         if (k.kind === 'P') {
-          p.power = Math.min(PLAYER.maxPower, p.power + 1);
+          /* 火力道具：所有已装武器各 +1（独立等级，见 Player.reset 的说明）。
+           * 不指定"给哪一把"，是因为 P 是成长主线、掉得最多，
+           * 每捡一瓶都让玩家做一次分配选择会把节奏拖碎；
+           * 想专精某一把，靠吃它的同款 W 单升（见 Player.addWeapon）。 */
+          for (let i = 0; i < p.lv.length; i++) {
+            p.lv[i] = Math.min(PLAYER.maxPower, p.lv[i] + 1);
+          }
         } else if (k.kind === 'W') {
           p.addWeapon(k.weapon || 0, this);
         } else if (k.kind === 'B') {
@@ -3196,20 +3257,25 @@ class Game {
 
       ctx.fillStyle = col;
       ctx.font = '8px ui-monospace, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(has ? WEAPONS[idx].name : '+', bx + w / 2, y + h / 2 + 0.5);
+      ctx.textAlign = 'left';
+      ctx.fillText(has ? WEAPONS[idx].name : '+', bx + 6, y + h / 2 + 0.5);
+      /* 每槽独立的等级：数字贴在胶囊右端。满级换暖色，
+       * 让玩家一眼看出"这把已经可以靠吃同款换全弹发射了"。 */
+      if (has) {
+        const lv = p.lv[i] || 1;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = lv >= PLAYER.maxPower ? '#ffe07a' : 'rgba(180,220,250,0.78)';
+        ctx.fillText('L' + lv, bx + w - 5, y + h / 2 + 0.5);
+      }
     }
 
-    const lx = sx + WEAPON_SLOTS * (w + gap) + 2;
-    ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(150,205,235,0.82)';
-    ctx.font = '10px ui-monospace, monospace';
-    ctx.fillText('LV' + p.power, lx, y + 5);
     if (canSwap) {
       // 有第二把武器才提示可切：只有一把时显示等于撒谎
+      const lx = sx + WEAPON_SLOTS * (w + gap) + 2;
+      ctx.textAlign = 'left';
       ctx.fillStyle = 'rgba(150,205,235,' + (0.42 + flash * 0.5).toFixed(2) + ')';
       ctx.font = '8px ui-monospace, monospace';
-      ctx.fillText('<> SWAP', lx, y + h - 3);
+      ctx.fillText('<> SWAP', lx, y + h / 2 + 0.5);
     }
     ctx.restore();
     ctx.textAlign = 'left';   // textBaseline 由 restore 还原，别在这里改
@@ -3870,6 +3936,16 @@ class Game {
       ctx.fillStyle = 'rgba(160,200,230,0.8)';
       ctx.font = '12px ui-monospace, monospace';
       ctx.fillText(this.level.sub, cx, VIEW.h * 0.40 + 80);
+      // 本关新威胁：新单位如果不在开场点名，玩家只会觉得"屏幕里多了个新色块"，
+      // 而不会意识到"这东西会打狙击弹/会拨我的子弹"。一行字成本最低、感知最强。
+      if (this.level.hint) {
+        ctx.save();
+        ctx.globalAlpha = clamp(a, 0, 1);
+        ctx.fillStyle = this.level.accent;
+        ctx.font = '600 13px "PingFang SC", sans-serif';
+        ctx.fillText('新威胁 · ' + this.level.hint, cx, VIEW.h * 0.40 + 110);
+        ctx.restore();
+      }
       ctx.restore();
       ctx.textAlign = 'left';
     }
@@ -4215,7 +4291,7 @@ class Game {
 
     /* ---------- 道具说明 ---------- */
     const items = [
-      { k: 'P', label: '火力 +1', color: '#66e0ff' },
+      { k: 'P', label: '全武器 +1 级', color: '#66e0ff' },
       { k: 'W', label: '换武器', color: '#ffc857' },
       { k: 'O', label: '僚机 +1', color: '#a8f4ff' },
       { k: 'R', label: '环绕机+1', color: '#ff8ce0' },
@@ -4273,7 +4349,7 @@ class Game {
     ctx.fillStyle = 'rgba(255,210,120,0.72)';
     ctx.fillText('W：不同武器各占一槽（最多 ' + WEAPON_SLOTS + ' 个），同时开火', cx, y0 + 62);
     ctx.fillStyle = 'rgba(255,180,140,0.66)';
-    ctx.fillText('W：满级后再吃同款 → 全弹发射', cx, y0 + 78);
+    ctx.fillText('W：同款再吃 → 那把枪 +1 级（满级转全弹发射）', cx, y0 + 78);
     ctx.fillStyle = 'rgba(160,240,255,0.72)';
     ctx.fillText('O：僚机最多 2 架；满员后再吃 → 短暂无敌', cx, y0 + 94);
     ctx.fillStyle = 'rgba(255,140,220,0.75)';
@@ -4283,6 +4359,8 @@ class Game {
     // 临时增益用菱形，和上面圆形的永久道具在视觉上分开
     ctx.fillStyle = 'rgba(159,232,255,0.72)';
     ctx.fillText('◇ S 护盾 / T 追踪弹 / D 宽头弹 / A 僚机：临时增益，到期消失', cx, y0 + 142);
+    ctx.fillStyle = 'rgba(255,120,140,0.7)';
+    ctx.fillText('P：全部已装武器各 +1 级 · 中弹：全部武器各 -1 级', cx, y0 + 158);
 
     ctx.fillStyle = 'rgba(110,150,180,0.45)';
     ctx.font = '9px ui-monospace, monospace';

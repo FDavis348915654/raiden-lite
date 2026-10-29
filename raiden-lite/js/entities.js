@@ -195,8 +195,9 @@ class Pickup {
 
   /** opt 决定这个道具怎么"飘"：
    *  dir   +1 自上而下 / -1 自下而上
+   *  dirX  +1 自左横穿 / -1 自右横穿（给了 dirX 就忽略 dir）
    *  bounce 可反弹次数（飘到底边或顶边翻向飘走）
-   *  sway  横向摆幅 px/s（洋流的摆动感）
+   *  sway  横向摆幅 px/s（洋流的摆动感；横穿时改成纵向摆动）
    *  speed 飘移速度 px/s */
   init(x, y, kind, weapon, opt) {
     opt = opt || {};
@@ -208,6 +209,7 @@ class Pickup {
     this.age = 0;
     this.vx = rand(-40, 40);
     this.dir = opt.dir === -1 ? -1 : 1;
+    this.dirX = opt.dirX === -1 ? -1 : (opt.dirX === 1 ? 1 : 0);
     this.speed = opt.speed || 78;
     this.sway = opt.sway || 0;
     this.phase = rand(0, Math.PI * 2);
@@ -219,14 +221,22 @@ class Pickup {
   update(dt, player) {
     this.t += dt;
     this.age += dt;
-    this.y += this.dir * this.speed * dt;
-    if (this.sway) this.x += Math.sin(this.age * 2.1 + this.phase) * this.sway * dt;
-    this.x += this.vx * dt;
-    this.vx *= Math.pow(0.96, dt * 60);
+    if (this.dirX) {
+      // 横穿补给：只走横向，纵向用 sway 做一点起伏，看起来像被气流斜着推过来。
+      // 注意不能复用 dir —— 出界回收和反弹都按 dir 判定，混用会让横穿的道具
+      // 一露头就被判成"飘出底边"而回收。
+      this.x += this.dirX * this.speed * dt;
+      if (this.sway) this.y += Math.sin(this.age * 2.1 + this.phase) * this.sway * dt;
+    } else {
+      this.y += this.dir * this.speed * dt;
+      if (this.sway) this.x += Math.sin(this.age * 2.1 + this.phase) * this.sway * dt;
+      this.x += this.vx * dt;
+      this.vx *= Math.pow(0.96, dt * 60);
+    }
 
     // 触边反弹：飘到底边（或顶边）翻向飘走，慢一档并侧推一下，
     // 否则会沿着原路线直上直下，看着像卡住
-    if (this.bounceLeft > 0) {
+    if (this.bounceLeft > 0 && this.dirX === 0) {
       const topEdge = PLAY_TOP + 18;
       const botEdge = VIEW.h - 30;
       if (this.dir > 0 && this.y >= botEdge) {
@@ -259,9 +269,14 @@ class Pickup {
       }
     }
 
-    this.x = clamp(this.x, 20, VIEW.w - 20);
+    // 横穿的道具从屏幕外进场，不能夹到 20~W-20，否则第一帧就被拉到边上"瞬移"进来
+    if (this.dirX === 0) this.x = clamp(this.x, 20, VIEW.w - 20);
     // 回收按当前方向判断：反弹后反向飞走的道具才不会一露头就被判出界
-    if (this.dir > 0) {
+    if (this.dirX > 0) {
+      if (this.x > VIEW.w + 40) this.active = false;
+    } else if (this.dirX < 0) {
+      if (this.x < -40) this.active = false;
+    } else if (this.dir > 0) {
       if (this.y > VIEW.h + 40) this.active = false;
     } else if (this.y < PLAY_TOP - 70) {
       this.active = false;
@@ -351,7 +366,13 @@ class Player {
   reset() {
     this.lives = PLAYER.lives;
     this.bombs = PLAYER.bombs;
-    this.power = PLAYER.startPower;
+    /* 火力等级改为**按槽独立**：lv[i] 和 weapons[i]/slotT[i] 并行，长度必须一致。
+     * 三条会改变它的路径：
+     *   P 道具  → 所有已装武器各 +1（不占玩家决策，成长主线）
+     *   同款 W  → 只有那一把 +1（想专精某把枪就盯着吃它，满级后转成全弹发射）
+     *   中弹    → 所有槽各 -1（死亡要能真的打疼）
+     * 新枪入场时接主武器等级，避免"第 7 关捡到新枪却是 L1"这种拿不起来的情况。 */
+    this.lv = [PLAYER.startPower];
     this.weapons = [0];              // 武器槽（索引到 WEAPONS），最多 WEAPON_SLOTS 个
     this.slotT = [0];                // 每个槽独立的开火冷却
     this.options = [];               // 全新一局清空僚机
@@ -378,6 +399,13 @@ class Player {
     if (!this.options) this.options = [];
     if (!this.orbits) this.orbits = [];
     if (!this.weapons) this.weapons = [0];
+    /* 等级表与武器槽必须等长：调试面板会直接改 weapons，长度对不上就整表重建，
+     * 否则 lv[i] 读到 undefined，那一槽会退化成 L1（看起来像"换关掉级"）。 */
+    if (!this.lv || this.lv.length !== this.weapons.length) {
+      const old = this.lv || [];
+      this.lv = this.weapons.map((_, i) =>
+        clamp(old[i] || PLAYER.startPower, 1, PLAYER.maxPower));
+    }
     this.slotT = this.weapons.map(() => 0);   // 换关清零冷却
     this.shotQ = [];                          // 错峰队列也清空，免得上一关的子弹跨关冒出
     for (const o of this.options) o.slotT = [0.12, 0.26];
@@ -553,7 +581,7 @@ class Player {
         if (o.slotT[s2] > 0 || !this.canFire) continue;
         // 副槽火力和射速都再压一档，否则两架僚机四个槽会盖过主机
         const mul = s2 === 0 ? 0.55 : 0.40;
-        const pow = Math.min(s2 === 0 ? 2 : 1, this.power);
+        const pow = Math.min(s2 === 0 ? 2 : 1, this.lv[wi] || PLAYER.startPower);
         this.fireFrom(game, o.x, o.y - 18, mul, pow, wi);
         o.slotT[s2] = WEAPONS[wi].cd * (s2 === 0 ? 1.45 : 1.9);
       }
@@ -664,7 +692,7 @@ class Player {
     if (wi === undefined) return;
     ta.slotT -= dt;
     if (ta.slotT > 0 || !this.canFire) return;
-    this.fireFrom(game, ta.x, ta.y - 18, C.mul, Math.min(C.powMax, this.power), wi);
+    this.fireFrom(game, ta.x, ta.y - 18, C.mul, Math.min(C.powMax, this.lv[0] || PLAYER.startPower), wi);
     ta.slotT = WEAPONS[wi].cd * 1.6;
   }
 
@@ -682,7 +710,9 @@ class Player {
     if (idx === undefined) return;
     const off = s2 === 0 ? 0 : (s2 === 1 ? -14 : (s2 === 2 ? 14 : 0));
     const up = s2 === 3 ? 8 : 0;
-    this.fireFrom(game, this.x + off, this.y - 34 - up, SLOT_DMG[s2] || 1, null, idx, s2 > 0);
+    // 等级按槽取：副槽的枪可能比主槽低（新枪入场 / 专精养成），不能共用一个 power
+    this.fireFrom(game, this.x + off, this.y - 34 - up, SLOT_DMG[s2] || 1,
+      this.lv[s2] || PLAYER.startPower, idx, s2 > 0);
   }
 
   /** 错峰发射：把一轮里的后续子弹排进队列，到点才真正出膛。
@@ -712,10 +742,15 @@ class Player {
   }
 
   /** 从任意位置开火：僚机复用同一套弹道
-   *  mul 缩放伤害（僚机 0.55），pow 覆盖火力等级（僚机封顶 Lv2） */
+   *  mul 缩放伤害（僚机 0.55），pow 覆盖火力等级（僚机封顶 Lv2）
+   *
+   *  火力 1~5 级（PLAYER.maxPower = 5）。数值口径是"L5 与旧版三级封顶持平"：
+   *  下面每把枪都按 单发伤害递减 / 弹数递增 排，满级总 DPS 约等于旧 L3，
+   *  中间三级各自更弱。这样加等级不会把已经调好的敌机血量与 BOSS 时长推翻，
+   *  玩家的成长曲线却从三段变五段。 */
   fireFrom(game, bx, by, mul, pow, wIdx, quiet) {
     const wi = wIdx === undefined ? 0 : wIdx;
-    const p = pow || this.power;
+    const p = Math.min(PLAYER.maxPower, pow || this.lv[0] || PLAYER.startPower);
     const self = mul === undefined ? 1 : mul;
     game._shotMul = self;
 
@@ -723,19 +758,24 @@ class Player {
       /* 火神炮：一轮多颗，但**错峰**出膛。
        * 同一帧全吐出来的话，三发会在屏幕上糊成一条粗线，和散射炮的齐射没区别；
        * 按 0.042 秒一颗逐次发射，看起来是连珠，也才立住"持续压制"这个定位。
-       * 第一颗仍然立即出膛，保证按键/触屏的响应手感。 */
+       * 第一颗仍然立即出膛，保证按键/触屏的响应手感。
+       * 5 级按 1/2/3/4/5 路铺开，单发从 2.4 降到 1.45：满级 5×1.45 ≈ 旧三发的 7 点，
+       * 视觉上是"弹流变宽"而不是"每颗变重"。
+       * 每路的横向速度取自身出膛偏移的 4 倍，于是弹流是**向外微微张开**的扇形（最外一路约 5.6°），
+       * 不再是五条并行直线。张角压得很小：火神炮的定位是持续压制 + 瞄准感，
+       * 张到 10° 以上远处就打不中同一条线，手感会退化成第二把散射炮。 */
       case 'vulcan': {
         const gap = this.boostT > 0 ? 0.028 : 0.042;   // 全弹发射的射速强化期，连珠更密
-        const shots = p <= 1 ? [[0, 0, 0, -980, 2]]
-          : p === 2 ? [[-11, 0, 0, -980, 2], [11, 0, 0, -980, 2]]
-            : [[0, -4, 0, -1020, 3], [-15, 8, -120, -980, 2], [15, 8, 120, -980, 2]];
-        for (let i = 0; i < shots.length; i++) {
-          const s = shots[i];
+        const dmg = [2.4, 1.8, 1.6, 1.45, 1.45][p - 1];
+        for (let i = 0; i < p; i++) {
+          const off = (i - (p - 1) / 2) * 12;
+          // 外侧两路略低 8px：同一横坐标上的两条弹流会被误认成一条
+          const oy = Math.abs(off) > 12 ? 8 : 0;
+          const vx = off * 4;
           if (i === 0) {
-            game.spawnPlayerBullet(bx + s[0], by + s[1], s[2], s[3], s[4], { kind: 'player' });
+            game.spawnPlayerBullet(bx + off, by + oy, vx, -980, dmg, { kind: 'player' });
           } else {
-            this._queueShot(game, bx + s[0], by + s[1], s[2], s[3], s[4],
-              { kind: 'player' }, i * gap);
+            this._queueShot(game, bx + off, by + oy, vx, -980, dmg, { kind: 'player' }, i * gap);
           }
         }
         break;
@@ -744,55 +784,67 @@ class Player {
       /* 散射炮：一次齐射，扇面同时铺开，射程只有 0.40 屏高、张角 60°。
        * 速度恒定 780，所以把 life 直接算成 路径长度/速度 ——
        * 这样扇形里每一发的路径长度一致，远端边界会连成一条干净的弧。
-       * 单发 2.6（火神炮 2）：射程砍短之后命中窗口变少，靠单发更痛来补偿，
-       * 否则多档火力下散弹会彻底被火神炮比下去。 */
+       * 单发比同级的火神炮重（2.8 vs 2.4）：射程砍短之后命中窗口变少，
+       * 靠单发更痛来补偿，否则多档火力下散弹会彻底被火神炮比下去。 */
       case 'spread': {
-        // 一次齐射 5 / 10 / 15 发，铺满 60°（1.047 rad）；
-        // 射速在 config 里压到 0.28s，避免"弹数翻倍 + 高频"直接把 DPS 拉爆
-        const n = p === 1 ? 5 : p === 2 ? 10 : 15;
+        // 5 级齐射 5 / 8 / 11 / 14 / 17 发，铺满 60°（1.047 rad）；
+        // 单发 2.8 → 2.3，满级弹数比旧版多两成但总伤害持平，
+        // 射速在 config 里压到 0.34s，避免"弹数翻倍 + 高频"直接把 DPS 拉爆
+        const n = [5, 8, 11, 14, 17][p - 1];
+        const dmg = [2.8, 2.55, 2.4, 2.4, 2.3][p - 1];
         const total = 1.047;                 // 60°
         const life = SPREAD_RANGE / 780;
         for (let i = 0; i < n; i++) {
           const a = -Math.PI / 2 - total / 2 + (i * total) / (n - 1);
-          game.spawnPlayerBullet(bx, by, Math.cos(a) * 780, Math.sin(a) * 780, 2.6,
+          game.spawnPlayerBullet(bx, by, Math.cos(a) * 780, Math.sin(a) * 780, dmg,
             { kind: 'spread', r: 7, life: life });
         }
         break;
       }
 
+      /* 穿透激光：几条细光柱并排，弹数跟等级走（1~5 条）。
+       * 单发 4.4 → 2.45，五条并排时总伤与旧版三条持平，
+       * 视觉上是"光束变粗"，判定仍是各自独立的细柱（r10）。 */
       case 'laser': {
+        const dmg = [4.4, 3.2, 2.8, 2.6, 2.45][p - 1];
         for (let i = 0; i < p; i++) {
-          const off = (i - (p - 1) / 2) * 13;
-          game.spawnPlayerBullet(bx + off, by - 24, 0, -1500, 4,
+          const off = (i - (p - 1) / 2) * 11;
+          game.spawnPlayerBullet(bx + off, by - 24, 0, -1500, dmg,
             { kind: 'laser', pierce: true, r: 10, life: 1.0 });
         }
         break;
       }
 
       case 'missile': {
+        const dmg = [4.3, 3.1, 2.75, 2.55, 2.45][p - 1];
         for (let i = 0; i < p; i++) {
-          const side = p === 1 ? 0 : (i === 0 ? -1 : i === 1 ? 1 : 0);
-          game.spawnPlayerBullet(bx + side * 16, by + 6, side * 170, -560, 4,
+          const off = (i - (p - 1) / 2) * 13;
+          game.spawnPlayerBullet(bx + off, by + 6, off * 7, -560, dmg,
             { kind: 'missile', homing: 6.2, r: 8, life: 3.2 });
         }
         break;
       }
 
-      /* 等离子炮：慢速大弹，命中后小范围爆炸 */
+      /* 等离子炮：慢速大弹，命中后小范围爆炸
+       * 5 级时五颗并排，单发 6.3 → 3.65；爆炸伤害同步从 4 压到 2.5 ——
+       * 每级多一颗弹，爆伤不压的话群伤会按"颗数"线性放大，五级的实际收益
+       * 会远超表上的单体 DPS。 */
       case 'plasma': {
+        const dmg = [6.3, 4.65, 4.1, 3.8, 3.65][p - 1];
         for (let i = 0; i < p; i++) {
-          const off = (i - (p - 1) / 2) * 22;
-          game.spawnPlayerBullet(bx + off, by - 8, off * 1.1, -560, 6,
-            { kind: 'plasma', r: 14, life: 2.6, boom: { r: 54, dmg: 4 } });
+          const off = (i - (p - 1) / 2) * 26;
+          game.spawnPlayerBullet(bx + off, by - 8, off * 1.1, -560, dmg,
+            { kind: 'plasma', r: 14, life: 2.6, boom: { r: 54, dmg: 2.5 } });
         }
         break;
       }
 
       /* 散榴弹：抛到前方固定时间后炸开，碎片向前扇开 */
       case 'flak': {
+        const dmg = [4.2, 3.0, 2.7, 2.5, 2.4][p - 1];
         for (let i = 0; i < p; i++) {
-          const off = (i - (p - 1) / 2) * 40;
-          game.spawnPlayerBullet(bx + off, by, off * 0.55, -620, 4,
+          const off = (i - (p - 1) / 2) * 34;
+          game.spawnPlayerBullet(bx + off, by, off * 0.55, -620, dmg,
             { kind: 'flak', r: 9, life: 2, fuse: 0.78 - i * 0.035 });
         }
         break;
@@ -800,9 +852,10 @@ class Player {
 
       /* 电弧炮：命中小怪后向邻近目标跳 2 次 */
       case 'tesla': {
+        const dmg = [3.25, 2.35, 2.05, 1.9, 1.8][p - 1];
         for (let i = 0; i < p; i++) {
-          const off = (i - (p - 1) / 2) * 20;
-          game.spawnPlayerBullet(bx + off, by, 0, -760, 3,
+          const off = (i - (p - 1) / 2) * 18;
+          game.spawnPlayerBullet(bx + off, by, 0, -760, dmg,
             { kind: 'tesla', r: 8, life: 1.5, chain: 2 });
         }
         break;
@@ -811,26 +864,33 @@ class Player {
       /* 逆火炮：前向直射 + 尾部向后扇形，专门应付从下方来的敌人
        * 尾炮出膛速度压到 470：原来 700 时从机尾到屏幕底边只要 0.23 秒，
        * 子弹基本还没飞到敌机身上就出屏了；压慢后在场时间约 0.34 秒，
-       * 配合 PLAYER.rearDmgMul 的伤害加成，才打得掉爬上来的 riser。 */
+       * 配合 PLAYER.rearDmgMul 的伤害加成，才打得掉爬上来的 riser。
+       * 前后两路都按等级加弹数（各级 1~5 发），单发各自下调：尾炮还吃
+       * rearDmgMul ×4，所以它的单发压得比前向更狠（1.55 → 0.9）。 */
       case 'backfire': {
+        const fwdDmg = [2.1, 1.65, 1.45, 1.35, 1.25][p - 1];
+        const rearDmg = [1.55, 1.2, 1.05, 0.98, 0.9][p - 1];
         for (let i = 0; i < p; i++) {
-          const off = (i - (p - 1) / 2) * 15;
-          game.spawnPlayerBullet(bx + off, by, 0, -940, 2, { kind: 'backfire' });
+          const off = (i - (p - 1) / 2) * 14;
+          game.spawnPlayerBullet(bx + off, by, 0, -940, fwdDmg, { kind: 'backfire' });
         }
         for (let i = 0; i < p; i++) {
-          const a = Math.PI / 2 + (i - (p - 1) / 2) * 0.42;
-          game.spawnPlayerBullet(bx, by + 52, Math.cos(a) * 470, Math.sin(a) * 470, 1.5,
+          const a = Math.PI / 2 + (i - (p - 1) / 2) * 0.38;
+          game.spawnPlayerBullet(bx, by + 52, Math.cos(a) * 470, Math.sin(a) * 470, rearDmg,
             { kind: 'backfire', r: 8, life: 1.5 });
         }
         break;
       }
 
-      /* 环射炮：四/六/八方向同时开火，被包围时能翻盘 */
+      /* 环射炮：4/6/8/10/12 方向同时开火，被包围时能翻盘。
+       * 方向数涨到 12 时单发降到 1.25：满级总伤与旧版 8 向 ×2 基本持平，
+       * 但覆盖面密一倍——它的价值本来就在"哪儿都有弹"，不在单点爆发。 */
       case 'omni': {
-        const dirs = p === 1 ? 4 : p === 2 ? 6 : 8;
+        const dirs = [4, 6, 8, 10, 12][p - 1];
+        const dmg = [1.45, 1.35, 1.35, 1.3, 1.25][p - 1];
         for (let i = 0; i < dirs; i++) {
           const a = -Math.PI / 2 + (i * Math.PI * 2) / dirs;
-          game.spawnPlayerBullet(bx, by, Math.cos(a) * 610, Math.sin(a) * 610, 2,
+          game.spawnPlayerBullet(bx, by, Math.cos(a) * 610, Math.sin(a) * 610, dmg,
             { kind: 'omni', r: 7, life: 1.35 });
         }
         break;
@@ -859,24 +919,31 @@ class Player {
     return true;
   }
 
-  /** 吃到 W 道具：已有则看是否触发全弹发射，没有则占一个空槽 */
+  /** 吃到 W 道具：已有的那把**自己升一级**，没有则占一个空槽
+   *  （满级再吃同款 → 全弹发射）。这是"独立等级"里的主动成长线：
+   *  P 只能全槽齐涨，想把这把枪先推到满级、先解锁它的全弹发射，就得专喂它 W。 */
   addWeapon(idx, game) {
     idx = ((idx % WEAPONS.length) + WEAPONS.length) % WEAPONS.length;
     const exist = this.weapons.indexOf(idx);
 
     if (exist >= 0) {
-      if (this.power >= PLAYER.maxPower) {
+      const cur = this.lv[exist] || PLAYER.startPower;
+      if (cur >= PLAYER.maxPower) {
         this.overdrive(game);        // 满级重复吃同款：全弹发射
         return 'overdrive';
       }
-      game.onWeaponDup(this, idx);
+      this.lv[exist] = Math.min(PLAYER.maxPower, cur + 1);
+      game.onWeaponDup(this, idx, this.lv[exist]);
       return 'dup';
     }
 
+    // 新枪入场直接接主武器等级：第 7 关捡到一把 L1 的枪等于没捡，玩家会直接放弃它
+    const entry = Math.min(PLAYER.maxPower, this.lv[0] || PLAYER.startPower);
     if (this.weapons.length < WEAPON_SLOTS) {
       this.weapons.push(idx);
       this.slotT.push(0);
-      game.onWeaponAdded(this, idx);
+      this.lv.push(entry);
+      game.onWeaponAdded(this, idx, entry);
       return 'add';
     }
 
@@ -889,6 +956,11 @@ class Player {
     if (this.slotT && this.slotT.length === WEAPON_SLOTS) {
       this.slotT.splice(1, 1);
       this.slotT.push(0);
+    }
+    // 等级表同理：被挤掉那把的等级要跟着走，新枪按入场等级接上
+    if (this.lv && this.lv.length === WEAPON_SLOTS) {
+      this.lv.splice(1, 1);
+      this.lv.push(entry);
     }
     game.onWeaponReplaced(this, out, idx);
     return 'replace';
@@ -904,11 +976,16 @@ class Player {
     // 槽位与冷却表必须等长：调试面板可能直接改 weapons，长度对不上时整表重建，
     // 不然 shift/push 会把 undefined 塞进冷却表，之后减 dt 变成 NaN 永不开火
     if (!this.slotT || this.slotT.length !== n) this.slotT = this.weapons.map(() => 0);
+    // 等级表同样要跟着整条轮转：只搬 weapons 的话，主位会拿到上一把枪的等级
+    if (!this.lv || this.lv.length !== n) {
+      this.lv = this.weapons.map(() => PLAYER.startPower);
+    }
     const to = (slot === undefined || slot < 0 || slot >= n) ? 1 : slot;
     if (to === 0) return false;
     for (let k = 0; k < to; k++) {
       this.weapons.push(this.weapons.shift());
       this.slotT.push(this.slotT.shift());
+      this.lv.push(this.lv.shift());
     }
     // 切上来的武器立刻能开火：还要等 0.3 秒才出声，会被当成"切枪卡顿"
     this.slotT[0] = Math.min(this.slotT[0], 0.06);
@@ -977,8 +1054,16 @@ class Player {
     if (this.invuln > 0 || !this.alive) return false;
     this.lives -= 1;
     this.invuln = PLAYER.invuln;
-    // 致命一击不再额外降火力：命都没了，续关回来还得能打
-    if (this.lives > 0) this.power = Math.max(1, this.power - 1);
+    /* 掉血 = 所有武器槽各降一级（3.28 起）。
+     * 代价按"每把枪"算而不是只砍主武器：四槽齐掉一级，满级被打回 4 级，
+     * 一次失误就能听出火力变薄——这是本作唯一会让"已经赚到的成长"倒退的惩罚，
+     * 也是独立等级真正被玩家感知到的时刻。
+     * 致命一击（剩余命数 0）不再额外掉级：命都没了，续关回来还得能打。 */
+    if (this.lives > 0) {
+      for (let i = 0; i < this.lv.length; i++) {
+        this.lv[i] = Math.max(1, this.lv[i] - 1);
+      }
+    }
     SFX.playerHit();
     /* 受击反馈：震屏给到 0.46 秒（默认 0.32 太短，玩家还没意识到挨枪就结束了），
      * 半径 18 震不出"被撞了一下"的重量感；爆炸也放大一圈，让机位一眼可见。 */
@@ -2301,7 +2386,11 @@ class Boss {
     if (this.fireT <= 0) {
       const pattern = BOSS_PATTERNS[this.sprite];
       const cd = pattern ? pattern(this, game) : 1.2;
-      this.fireT = cd * 0.9;              // 整体提频 10%，配合血量提升
+      /* 全局 0.9 提频 + 关卡自己的 bossRate。
+       * bossRate 是 3.28 起给后四关的"出招更快"旋钮：只改这一个乘数，
+       * 不用去动每个 pattern 里散落的 1.05/1.4/2.1 秒，
+       * 也就不会出现"某一段忘了提速"的不一致。 */
+      this.fireT = cd * 0.9 * (this.stage.bossRate || 1);
     }
 
     // 会呼叫支援的 BOSS
