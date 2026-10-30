@@ -26,6 +26,8 @@
 | `raiden-lite/js/atlas.js` | 自动生成，**不要手改** | — |
 | `raiden-lite/assets/` | 程序化生成的贴图；`sprites.png` 由脚本重排，手改会错位 | — |
 | `raiden-lite/tools/` | 生成与验证脚本（见下） | 运行时代码 |
+| `raiden-lite/README.md` | 玩家向文档：玩法、道具、敌机、BOSS、调数值 | 架构细节 |
+| `raiden-lite/TECH.md` | 技术实现说明：选型、主循环、渲染顺序、对象池、资源、音频、输入、工具链、迁移评估 | 玩法数值（引用 config.js） |
 
 加载顺序（倒过来会 undefined）：`config → audio → atlas → assets → entities → levels → game`
 

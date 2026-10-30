@@ -4,6 +4,8 @@
 美术全部由脚本程序化生成（无外部素材依赖），音效由 WebAudio 实时合成。
 目标是把玩法先跑通、调爽，再按 `../小米手环10-雷电Lite开发方案.md` 移植到小米手环 10。
 
+> 本文写**玩法与数值**。想了解底层怎么实现（主循环、渲染、对象池、资源、工具链），看 [TECH.md](TECH.md)。
+
 ---
 
 ## 版本
@@ -638,6 +640,7 @@ drone / sniper / eel / mineH…），所以单个侧向波连同补充波实际�
 ```
 raiden-lite/
 ├── index.html          入口
+├── TECH.md             技术实现说明（架构 / 循环 / 渲染 / 对象池 / 工具链）
 ├── css/style.css       页面与画布自适应
 ├── js/
 │   ├── atlas.js        精灵帧表（由生成脚本写出，勿手改）
@@ -648,12 +651,12 @@ raiden-lite/
 │   ├── levels.js       编队生成 + 9 个 BOSS 的弹幕模式与专属机制
 │   └── game.js         主循环、状态机、碰撞、HUD
 ├── assets/
-│   ├── sprites.png     21 个精灵的图集（2006×245）
+│   ├── sprites.png     25 个精灵的图集（1907×474）
 │   ├── sprites.json    帧表（与 atlas.js 同源）
-│   ├── bg/bg1..bg9.png 9 张无缝滚动背景
+│   ├── bg/bg1..bg9.png 9 张 512×512 无缝滚动背景
 │   ├── _contact_ships.png   精灵验收图
 │   └── _contact_boss.png    BOSS 验收图
-└── tools/gen_assets.py 素材生成器（PIL + numpy）
+└── tools/              生成与验证脚本（素材 / 判定轮廓 / 平衡 / 冒烟）
 ```
 
 ---
