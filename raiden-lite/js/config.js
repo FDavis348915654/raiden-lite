@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.29.1';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.31.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -29,14 +29,20 @@ const OUTRO = {
   firstDelay: 0.3    // 起算到第一组的延迟，给玩家一点喘息
 };
 
-/* 蛇形小 BOSS（第 9 关第二轮）
- * 沿屏幕四周的圆角矩形环路游荡，头难打、身脆，每个关节都会朝玩家发弹。
- * 打爆蛇头 → 整条崩解；只剪身体只能削掉发弹点，不能击杀。
+/* 蛇形小 BOSS（第 8 关教学 / 第 9 关双蛇）
+ * 沿屏幕四周的圆角矩形环路游荡，每个关节都会朝玩家发弹。
+ *
+ * 3.31 起身体是"计分目标"而不是"顺手的软肋"：每节血量≈头（略少一成多），
+ * 所以流弹不会再白捡几节，想拿身体分必须专门压着一节打上五六秒。
+ *   · 打爆头 → 整条崩解、立即结束这场小 BOSS（击杀线最快，分最少）
+ *   · 打爆关节 → 只掉这一节，蛇还在，但每节都给一份高分
+ * 两条路的总分刻意做成"啃干净身体 > 直接爆头"，把"贪不贪"这个选择交给玩家；
+ * 代价是蛇一直在开火，且身体掉到 30% 会暴走。
  */
 const SNAKE = {
   segs: 8,               // 身体节数
   headHp: 1000,          // 头：需要专注输出 6~7 秒
-  segHp: 130,            // 每节：剪一节 1 秒左右
+  segHp: 860,            // 每节：≈ 头的 0.86，压着一节打完约 5~6 秒
   spacing: 26,           // 相邻节沿路径的弧长间隔（要 ≤ 最细节的直径，否则尾巴会断成一节一节）
   speed: 152,            // 沿路径速度 px/s（一圈约 13 秒，玩家有追打时间）
   headR: 25,
@@ -48,10 +54,11 @@ const SNAKE = {
   spawnGuard: 1.4,       // 出场保护，避免刚露面就被贴脸打
   inset: { x: 58, top: PLAY_TOP + 54, bottom: 76, radius: 46 },
 
-  /* 暴走：蛇被剪掉几节、或头血量过半后提速加射速，
-   * 让"先剪身体"这个选择有代价——削弱弹幕的同时把剩下的部分激怒。 */
+  /* 暴走：身体累计掉血三成、或头血量过半后提速加射速。
+   * 按"身体掉血比例"而不是"掉了几个关节"判定——关节血量提高之后，
+   * 数节数等于要玩家先砍掉半条蛇才触发，那条分支就成了死代码。 */
   rage: {
-    lostSegs: 3,         // 掉这么多节就暴走
+    lostBody: 0.30,      // 身体累计掉血达到这个比例就暴走（8 节时约 2.4 节）
     hpRatio: 0.5,        // 或者头血量低于这个比例
     speedMul: 1.55,      // 沿路径速度倍率（一圈 12.8s → 8.3s）
     fireMul: 0.62,       // 发弹间隔倍率（越小越快）
@@ -61,13 +68,13 @@ const SNAKE = {
 
   /* 双蛇（第 9 关压轴）：同一条环路上一正一反游走。
    * 两条蛇各自吃满血条会变成"打不完的墙"，所以把总量按 1.5 条单蛇控制：
-   * 头 1250 × 2 = 2500（击杀门槛），节 160 × 7 是可选的"削弹幕"开销。
+   * 头 1250 × 2 = 2500（击杀门槛），节 1040 × 7 是可选的"刷分/削弹幕"开销。
    * 射速单条降 42%（0.15 → 0.26），两条合计 7.7 发/秒，只比原来单条 6.7 高一点；
    * 头扇形 2.1 → 3.2 秒，让玩家有真正的穿行窗口，而不是被两股扇形夹死。 */
   twin: {
     segs: 7,
     headHp: 1250,
-    segHp: 160,
+    segHp: 1040,
     fireGap: 0.26,
     headFireGap: 3.2,
     speed: 150
@@ -104,6 +111,7 @@ const PLAYER = {
   bombRadius: 210,          // 爆炸半径（屏幕宽 480，横向约覆盖 88%）
   bombBossDmg: 160,         // BOSS 轮廓被罩住时的固定伤害
   bombSnakeDmg: 180,        // 蛇头只吃这些，避免一颗雷直接删掉整条蛇
+  bombSnakeSegDmg: 90,      // 蛇身同理：一颗雷罩住三四节就白赚几千分，必须压低
   bombCd: 0.9,              // 普通保险冷却（从按下算）：比 0.35s 引信长，连点不会在上一颗还在飞时又扔一颗
   /* 判定半径：9 → 6（贴图宽 40，判定直径 12，只有机身的 30%）。
    * 第一版只缩到 7.5，玩家在调试层里量不出区别（18px → 15px），
@@ -429,21 +437,29 @@ const TEMP_INFO = {
  * 它是全表单位价值最高的条目，给成常客会让 5 级系统在半关内走完。
  */
 const DROPS = [
-  { kind: 'P', w: 0.9, from: 1 },   // 火力 +1（全槽）——最稀有：一瓶顶四瓶其他道具
-  /* W 权重第一：它一身两职——
-   * 既是"换一把新枪"，也是"给已有的那把单独升一级"。
-   * 每关解锁两把之后池子更大、抽中"想要的那把"更难，W 不能跟着一起砍。 */
-  { kind: 'W', w: 6.0, from: 1 },   // 换武器 / 同款升级
-  { kind: 'B', w: 3.0, from: 1 },   // 保险 +1
+  { kind: 'P', w: 0.6, from: 1 },   // 火力 +1（全槽）——最稀有：一瓶顶四瓶其他道具
+  /* W 权重 6.0 → 3.0：3.29 之前它是"换枪 + 单枪升级"的唯一入口，给第一梯队；
+   * 但实战里 W 和 P 一起把火力线喂得太快，编队还没成形就清空了。
+   * 现在把这两条压下去，省出来的份额给临时增益（S/T/D/A）——
+   * 那些是"这一关怎么打"的变化，不是"数值一直往上爬"。 */
+  { kind: 'W', w: 3.0, from: 1 },   // 换武器 / 同款升级
+  { kind: 'B', w: 2.6, from: 1 },   // 保险 +1
   { kind: 'H', w: 1.8, from: 1 },   // 生命 +1
-  { kind: 'O', w: 1.4, from: 3 },   // 僚机 +1
-  { kind: 'R', w: 1.8, from: 3 },   // 环绕机 +1
-  { kind: 'L', w: 1.0, from: 5 },   // 激光保险 +1
-  { kind: 'S', w: 1.2, from: 5 },   // 护盾（30s）
-  { kind: 'T', w: 0.9, from: 6 },   // 高爆追踪弹（14s）
-  { kind: 'D', w: 0.9, from: 7 },   // 宽头弹（14s）
-  { kind: 'A', w: 0.9, from: 8 }    // 临时僚机（20s）
+  { kind: 'O', w: 1.8, from: 3 },   // 僚机 +1
+  { kind: 'R', w: 2.2, from: 3 },   // 环绕机 +1
+  { kind: 'L', w: 1.2, from: 5 },   // 激光保险 +1
+  /* --- 临时增益：掉率最低的常驻条目之外，四条主力全部上调 ---
+   * 解锁关整体提前两档（S 3 / T 4 / D 5 / A 6），
+   * 否则前五六关只有 P/W/B/H，玩家感觉不到"打过的东西在变"。 */
+  { kind: 'S', w: 2.4, from: 3 },   // 护盾（30s）
+  { kind: 'T', w: 2.2, from: 4 },   // 高爆追踪弹（14s）
+  { kind: 'D', w: 2.2, from: 5 },   // 宽头弹（14s）
+  { kind: 'A', w: 2.2, from: 6 }    // 临时僚机（20s）
 ];
+
+/** 临时增益的解锁关：BOSS 空投 / 四周补给按它过滤，
+ *  避免在第 3 关就空投一件"这一关根本不该出现"的宽头弹 */
+const TEMP_FROM = { S: 3, T: 4, D: 5, A: 6 };
 
 /** 按关卡过滤后的累计区间表。
  *  w 的口径是**百分数**（本关生效条目相加 = 总掉率，12.2 表示 12.2%），
@@ -469,21 +485,21 @@ function dropTable(stageId) {
  * 击破掉落压下来之后，道具的"底盘"由这里承担：每隔 edgeSupplyGap() 秒，
  * 从上下左右四条边随机挑一条送一份进场（左右两条边是横穿屏幕，见 Pickup.dirX）。
  *
- * 权重刻意压在 W / B / H 上：P 的绝对量由每关固定的 supply 点（每关 2 瓶）
- * 加 BOSS 空投管够，这里再大量出 P，就又回到"两关满级"的老问题。
- * W 第一：独立等级之后，"吃到我想要的那把"才是升级的唯一主动手段。
+ * 3.30：W / P 各砍一档，省下来的预算全给临时增益——
+ * 这条路每关能送 6~10 份，是"临时道具出现频率"最有效的旋钮，
+ * 而且它不参与击破掉落，调它不会连带改变"打爆一架掉什么"的手感。
  */
 const EDGE_SUPPLY = [
-  { kind: 'W', w: 4.6, from: 1 },
-  { kind: 'P', w: 1.2, from: 1 },
+  { kind: 'W', w: 2.6, from: 1 },
+  { kind: 'P', w: 0.7, from: 1 },
   { kind: 'B', w: 2.2, from: 1 },
   { kind: 'H', w: 1.3, from: 1 },
-  { kind: 'S', w: 1.4, from: 3 },
-  { kind: 'O', w: 1.0, from: 4 },
-  { kind: 'R', w: 1.0, from: 5 },
-  { kind: 'T', w: 1.0, from: 6 },
-  { kind: 'D', w: 1.0, from: 7 },
-  { kind: 'A', w: 0.9, from: 8 }
+  { kind: 'S', w: 2.2, from: 3 },
+  { kind: 'O', w: 1.6, from: 4 },
+  { kind: 'R', w: 1.8, from: 5 },
+  { kind: 'T', w: 1.8, from: 4 },
+  { kind: 'D', w: 1.8, from: 5 },
+  { kind: 'A', w: 1.8, from: 6 }
 ];
 
 /** 间隔随关卡收紧：13s → 7.4s。后期敌人多、屏幕挤，道具得来得更勤才追得上消耗 */
@@ -595,9 +611,13 @@ const ENEMY_DEFS = {
 
   /* 蛇形小 BOSS 的部件：不走自己的 AI，位置由 game._updateSnake 沿路径写入。
    * 复用 Enemy 是为了白嫖碰撞、受击闪白、死亡结算；绘制由 game._drawSnake 统一画，
-   * 所以这里的 sprite 只用来取一个尺寸基准，实际不绘制。 */
-  snakeHead: { sprite: 'e_heavy',     hp: 1000, speed: 0,   score: 3200, r: 0.9, ai: 'snake' },
-  snakeBody: { sprite: 'e_mine',      hp: 130,  speed: 0,   score: 240,  r: 0.9, ai: 'snake' }
+   * 所以这里的 sprite 只用来取一个尺寸基准，实际不绘制。
+   *
+   * 分账（3.31）：头 2800 / 每节 1000。8 节全啃干净 = 8000，比直接爆头多 2.9 倍；
+   * 但一节 860 血、要压着一节打五六秒，还得顶着暴走后的加强弹幕——
+   * "贪身体"必须是玩家自己算过账的选择，不是白送。 */
+  snakeHead: { sprite: 'e_heavy',     hp: 1000, speed: 0,   score: 2800, r: 0.9, ai: 'snake' },
+  snakeBody: { sprite: 'e_mine',      hp: 860,  speed: 0,   score: 1000, r: 0.9, ai: 'snake' }
 };
 
 /* 分裂体：第 8 关 BOSS 分裂出来的分身，用 BOSS 精灵的小号版本 */
@@ -629,6 +649,28 @@ const SPAWN_GUARD = {
   mbPrism: 1.45,    // 棱镜血最厚，多给 0.15 秒避免刚露头就被齐射压穿护盾再打死
   mbRam: 1.30
 };
+
+/* 入场保护：整只（含贴图）还没进入可活动区时免疫，进入后再给 buf 秒缓冲。
+ * 起因是满配火力下"编队还没露头就被打散"——子弹一路飞到 y=-48 就结算，
+ * 玩家只看到一串道具飘下来，看不到编队、也看不到它们开火。
+ * 保护期内子弹**穿过**而不是被吃掉（见 game._updateBullets），所以不会变成"白打"。
+ *
+ * buf 按"露出速度与体型"分档：小快机几乎不需要，大慢机要长一点，
+ * 从底部升起的（riser / 小 BOSS）已经有 SPAWN_GUARD 覆盖同一段时间，不再叠加。
+ * max 是兜底：横穿/绕边的单位可能永远不满足"完全进入"，不能因此永久无敌。 */
+const ENTRY_GUARD = {
+  max: 3.0,
+  def: 0.12,
+  buf: {
+    scout: 0.06, fighter: 0.06, diver: 0.08, drone: 0.06,
+    kamikaze: 0.06, formation: 0.08, mine: 0.10, mineH: 0.10,
+    torpedo: 0.12, eel: 0.14, flame: 0.12, mirror: 0.14, looper: 0,
+    heavy: 0.22, bomber: 0.20, jelly: 0.18, shield: 0.22, deflect: 0.22,
+    riser: 0, miniboss: 0, mbSniper: 0, mbPrism: 0, mbRam: 0,
+    splitling: 0.15
+  }
+};
+
 
 /* ---------------- 关卡 ----------------
  * density       : 非小 BOSS 波次的数量倍率。3.28 起从 1.30 阶梯拉到 2.78
@@ -686,6 +728,9 @@ const LEVELS = [
       { at: 12.5, kind: 'scout',   n: 4,  side: 'left',   gap: 0.14 },   // 教学：第一次见到侧向来敌
       { at: 15.5, kind: 'bomber',  n: 2,  form: 'sides',   speed: 64,  gap: 0.7 },
       { at: 19.0, kind: 'scout',   n: 7,  form: 'arc',     speed: 126, gap: 0.11 },
+      /* 第二次侧向：换成 fighter（会开火的机型），第一次只教"它们会从旁边来"，
+       * 这一次教"从旁边来的东西也会朝你打"。3.31 起每关都补一条侧向波。 */
+      { at: 20.7, kind: 'fighter', n: 3,  side: 'right',  gap: 0.34 },
       { at: 22.5, kind: 'fighter', n: 4,  form: 'vee',     speed: 100, gap: 0.30 },
       { at: 25.5, kind: 'bomber',  n: 2,  form: 'line',    speed: 68,  gap: 0.6 },
       { at: 27.0, kind: 'scout',   n: 8,  form: 'diamond', speed: 132, gap: 0.10 }
@@ -724,6 +769,7 @@ const LEVELS = [
       { at: 18.5, kind: 'diver',     n: 4, side: 'right', gap: 0.15 },   // 从右侧切入后俯冲
       { at: 21.5, kind: 'mine',      n: 4, form: 'line',   speed: 44,  gap: 0.42 },
       { at: 24.5, kind: 'formation', n: 6, form: 'wave',   speed: 114, gap: 0.12 },
+      { at: 26.2, kind: 'formation', n: 4, side: 'left',  gap: 0.16 },   // 侧向夹击：跟正面那排形成十字
       { at: 27.5, kind: 'diver',     n: 5, form: 'pincer', speed: 94,  gap: 0.24 },
       { at: 29.5, kind: 'miniboss',  n: 1, form: 'line',   speed: 58,  gap: 0.5, lane: 0.5 }
     ]
@@ -759,6 +805,7 @@ const LEVELS = [
       { at: 15.5, kind: 'torpedo', n: 6, side: 'left',  gap: 0.16 },   // 高速从左侧掠过
       { at: 19.0, kind: 'eel',     n: 5, form: 'sides',  speed: 92,  gap: 0.32 },
       { at: 22.5, kind: 'torpedo', n: 7, form: 'column', speed: 288, gap: 0.18 },
+      { at: 24.0, kind: 'eel',     n: 3, side: 'right', gap: 0.34 },   // 侧向游入后照旧潜到底再窜上来
       { at: 26.0, kind: 'eel',     n: 5, form: 'diamond', speed: 90, gap: 0.34 },
       { at: 29.5, kind: 'torpedo', n: 6, form: 'wave',   speed: 270, gap: 0.20 },
       { at: 32.0, kind: 'miniboss', n: 2, form: 'line',  speed: 58,  gap: 0.5 }
@@ -797,6 +844,7 @@ const LEVELS = [
       { at: 12.5, kind: 'drone',  n: 7, form: 'vee',    speed: 146, gap: 0.08 },
       { at: 16.0, kind: 'looper', n: 4, side: 'left',  gap: 0.14 },   // 侧向切入后落到下方再爬回来
       { at: 19.5, kind: 'shield', n: 3, form: 'arc',    speed: 64,  gap: 0.7 },
+      { at: 21.0, kind: 'drone',  n: 4, side: 'left',  gap: 0.12 },   // 侧向切入后直接转入追击
       { at: 23.0, kind: 'drone',  n: 8, form: 'diamond', speed: 150, gap: 0.07 },
       { at: 26.5, kind: 'looper', n: 4, form: 'vee',    speed: 116, gap: 0.28 },
       { at: 30.0, kind: 'shield', n: 3, form: 'sides',  speed: 68,  gap: 0.6 },
@@ -835,6 +883,7 @@ const LEVELS = [
       { at: 8.5,  kind: 'mirror', n: 4, form: 'sides',  speed: 94,  gap: 0.36 },
       { at: 12.0, kind: 'heavy',  n: 2, form: 'line',   speed: 44,  gap: 1.2 },
       { at: 15.5, kind: 'flame',  n: 6, form: 'arc',    speed: 94,  gap: 0.30 },
+      { at: 17.2, kind: 'flame',  n: 4, side: 'right', gap: 0.22 },   // 侧向压边：喷火机从右翼贴过来
       { at: 19.0, kind: 'jelly',  n: 3, form: 'line',   speed: 54,  gap: 0.8 },
       { at: 22.5, kind: 'mirror', n: 7, form: 'vee',    speed: 98,  gap: 0.22 },
       { at: 26.0, kind: 'heavy',  n: 2, form: 'sides',  speed: 48,  gap: 1.0 },
@@ -878,10 +927,12 @@ const LEVELS = [
       { at: 8.5,  kind: 'mineH',  n: 4, form: 'arc',    speed: 34,  gap: 0.55 },
       { at: 12.0, kind: 'riser',  n: 5, form: 'sides',  speed: 134, gap: 0.42 },
       { at: 15.5, kind: 'sniper', n: 4, form: 'arc',    speed: 60,  gap: 0.7 },
+      { at: 17.3, kind: 'sniper', n: 3, side: 'left',   gap: 0.7 },   // 侧向滑入后照样悬停蓄力：狙击不再只从上面来
       { at: 19.0, kind: 'mineH',  n: 5, form: 'line',   speed: 36,  gap: 0.5 },
       { at: 22.5, kind: 'riser',  n: 5, form: 'line',   speed: 140, gap: 0.35 },
       { at: 26.0, kind: 'sniper', n: 4, form: 'sides',  speed: 62,  gap: 0.65 },
       { at: 29.5, kind: 'mineH',  n: 6, form: 'arc',    speed: 38,  gap: 0.45 },
+      { at: 31.2, kind: 'mineH',  n: 3, side: 'right', gap: 0.5 },   // 侧向飘入的浮雷：打爆照样十六向溅射
       { at: 33.0, kind: 'riser',  n: 6, form: 'sides',  speed: 144, gap: 0.32 },
       { at: 36.5, kind: 'sniper', n: 5, form: 'arc',    speed: 64,  gap: 0.6 },
       { at: 39.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 310 },
@@ -923,6 +974,7 @@ const LEVELS = [
       { at: 15.5, kind: 'kamikaze', n: 7, form: 'wave',    speed: 168, gap: 0.20 },
       { at: 19.0, kind: 'heavy',    n: 2, form: 'line',    speed: 48,  gap: 1.0 },
       { at: 22.5, kind: 'mirror',   n: 5, form: 'diamond', speed: 104, gap: 0.22 },
+      { at: 24.5, kind: 'mirror',   n: 4, side: 'left',  gap: 0.3 },   // 侧向包抄：镜像机左右夹着复制火力
       { at: 26.0, kind: 'deflect',  n: 3, form: 'line',    speed: 50,  gap: 0.6 },
       { at: 29.5, kind: 'kamikaze', n: 5, side: 'right', gap: 0.13 },   // 从右侧切入后直扑机身
       { at: 33.0, kind: 'flame',    n: 6, form: 'vee',     speed: 104, gap: 0.22 },
@@ -965,11 +1017,13 @@ const LEVELS = [
       { at: 8.5,  kind: 'flame',    n: 4, form: 'arc',     speed: 102, gap: 0.22 },
       { at: 12.0, kind: 'mirror',   n: 4, form: 'sides',   speed: 104, gap: 0.24 },
       { at: 15.5, kind: 'drone',    n: 7, form: 'diamond', speed: 156, gap: 0.07 },
+      { at: 17.4, kind: 'drone',    n: 4, side: 'left',  gap: 0.12 },   // 侧向切入的蜂群：紧贴屏幕边缘绕半圈再扑人
       { at: 19.0, kind: 'kamikaze', n: 5, form: 'pincer',  speed: 170, gap: 0.18 },
       { at: 22.5, kind: 'flame',    n: 5, form: 'trail',   speed: 106, gap: 0.16 },
       { at: 26.0, kind: 'mirror',   n: 5, form: 'diamond', speed: 108, gap: 0.18 },
       { at: 29.5, kind: 'drone',    n: 5, diag: 'ltr',   gap: 0.12 },   // 对角：左下 → 右上
       { at: 33.0, kind: 'kamikaze', n: 6, form: 'diamond', speed: 174, gap: 0.14 },
+      { at: 34.6, kind: 'mirror',   n: 4, side: 'right', gap: 0.2 },   // 侧向夹击：和正面的自杀机形成十字
       { at: 36.5, kind: 'flame',    n: 5, form: 'pincer',  speed: 106, gap: 0.20 },
       { at: 40.0, kind: 'mirror',   n: 6, form: 'wave',    speed: 110, gap: 0.18 },
       // 中段小 BOSS：波次放到一半时插一组，避免整关只有"蛇"一个记忆点；
@@ -1019,6 +1073,7 @@ const LEVELS = [
       { at: 19.0, kind: 'jelly',    n: 4,  form: 'arc',     speed: 54,  gap: 0.6 },
       { at: 22.5, kind: 'deflect',  n: 3,  form: 'line',    speed: 48,  gap: 0.6 },
       { at: 26.0, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 54,  gap: 0.8 },
+      { at: 27.8, kind: 'drone',    n: 5,  side: 'left',  gap: 0.08 },   // 侧向蜂群：贴左边缘切进来再追人
       { at: 29.5, kind: 'drone',    n: 11, form: 'diamond', speed: 162, gap: 0.06 },
       { at: 33.0, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
       { at: 36.5, kind: 'sniper',   n: 3,  side: 'right',  gap: 0.7 },   // 侧向滑入后悬停蓄力

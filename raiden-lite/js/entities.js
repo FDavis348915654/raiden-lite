@@ -1472,6 +1472,22 @@ class Enemy {
     this.fromBottom = !!opt.fromBottom;   // 从屏幕底部升起（爬升阶段不参与撞机）
     // 登场无敌只覆盖"还没冒出屏幕边缘"那段，具体秒数按机型配（见 SPAWN_GUARD）
     this.spawnGuard = this.fromBottom ? (SPAWN_GUARD[this.kind] || 1.2) : 0;
+    // 入场保护：还没完全进画面时不参与命中（见 ENTRY_GUARD）。
+    // 与 spawnGuard 分工不同——spawnGuard 管"从底部升上来、已经在画面里但还没露头"，
+    // 这一条管"从顶部/侧边刚生成、整队可能连贴图都没进画面"。
+    this.entryT = 0;
+    /* 蛇的部件不参与入场保护：位置由 game._updateSnake 沿路径统一写入，
+     * 不满足"整只进入画面"的几何判定，会被判成永久免疫、整条打不掉。
+     * 它们各自的 SPAWN_GUARD 已经覆盖出场那一段。 */
+    this.entryDone = this.ai === 'snake';
+    this.entryBuf = 0;
+    /* 池复用残留必须逐项清掉：snakeLink 由 game.spawnSnake 在 init 之后置 true，
+     * 而 draw() 见到它就整只跳过绘制（蛇要整体画成连续一条）。
+     * 不清的话，第 8 关先跑过一波蛇、蛇被击破，池子里那 8 个对象再被复用成
+     * BOSS 分身时就成了"看不见但打得掉"的幽灵——3.30 就是这个问题。 */
+    this.snakeLink = false;
+    this.segIdx = 0;
+    this.off = 0;
     // 偏折面：耐久按"还能拨几发"算，拨空后进入 down 秒的真实受击窗口。
     // 不用"无限偏折"是有意的——正面锁死等于逼玩家绕后，那只是换皮的无敌怪。
     this.deflectHp = def.deflect ? def.deflect.cap : 0;
@@ -1497,6 +1513,7 @@ class Enemy {
     this.t += dt;
     if (this.flash > 0) this.flash -= dt;
     if (this.spawnGuard > 0) this.spawnGuard -= dt;
+    if (this.ai !== 'snake') this._updateEntry(dt);
     if (this.dflash > 0) this.dflash -= dt;
     // 偏折面过载 → 计时结束自动充能。放在这里而不是判定里，
     // 否则一帧多颗子弹会把同一个计时器反复清零。
@@ -1922,8 +1939,38 @@ class Enemy {
     }
   }
 
+  /** 入场保护：整只（含贴图）进入可活动区之后，再按机型给一小段缓冲。
+   *  缓冲的作用是"刚露头别立刻被爆发掉"——玩家满屏弹幕时，
+   *  敌机往往在 y=-40 就被打死，编队永远排不出来，也看不到它们开火。
+   *  entryT 有上限：横穿/绕边的单位可能一辈子不满足"完全进入"，不能因此永久无敌。 */
+  _updateEntry(dt) {
+    if (this.entryDone) {
+      if (this.entryBuf > 0) this.entryBuf -= dt;
+      return;
+    }
+    this.entryT += dt;
+    const s = this.scale;
+    const hw = this.w * s * 0.42;
+    const hh = this.h * s * 0.42;
+    /* 判"已入场"的阈值取"贴图开始露头"（下沿越过屏幕顶 +8px），不是"整只进来"：
+     * 整只进来要等半秒多，慢机在密度高的关卡会多积压一批。
+     * 玩家看到的那一下就已经能打，才符合"露头即可打、没露头打不到"的直觉。 */
+    const inside = this.x - hw > 6 && this.x + hw < VIEW.w - 6 &&
+      this.y + hh > 8 && this.y + hh < VIEW.h + 40;
+    if (inside || this.entryT >= ENTRY_GUARD.max) {
+      this.entryDone = true;
+      const b = ENTRY_GUARD.buf[this.kind];
+      this.entryBuf = b === undefined ? ENTRY_GUARD.def : b;
+    }
+  }
+
+  /** 入场保护期内免疫且不消耗子弹（子弹直接穿过，见 game._updateBullets） */
+  get entryImmune() {
+    return !this.entryDone || this.entryBuf > 0;
+  }
+
   hit(dmg, bullet, game) {
-    if (this.spawnGuard > 0) return;   // 登场保护期内免疫
+    if (this.spawnGuard > 0 || this.entryImmune) return;   // 登场保护期内免疫
     // 护盾机：从下方打过来的子弹（正面）只吃 15% 伤害
     if (this.kind === 'shield' && bullet && bullet.y > this.y + this.h * 0.12) {
       dmg *= 0.15;
@@ -1988,6 +2035,24 @@ class Enemy {
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.r * 2.0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 入场保护：淡青光圈，告诉玩家"这一小会儿打不中"，
+    // 否则子弹穿过去会被读成"判定漏了"。完全在画面外时不画——
+    // 贴图都没露出来，画个圈反而像凭空冒光。
+    const halfH = this.h * s * 0.5;
+    if (this.entryImmune && this.y + halfH > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = this.entryBuf > 0
+        ? Math.min(0.22, this.entryBuf * 0.9)
+        : 0.16;
+      ctx.strokeStyle = '#bfefff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r * 1.35, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }

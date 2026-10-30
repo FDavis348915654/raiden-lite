@@ -911,6 +911,7 @@ class Game {
       if (!e.active) continue;
       if (dist2(b.x, b.y, e.x, e.y) > (R + e.r) * (R + e.r)) continue;
       if (e.kind === 'snakeHead') e.hit(PLAYER.bombSnakeDmg, null, this);
+      else if (e.kind === 'snakeBody') e.hit(PLAYER.bombSnakeSegDmg, null, this);
       else e.hit(9999, null, this);
     }
     // 3) BOSS：轮廓只要被爆炸圈罩住就吃固定伤害（用与撞机/子弹同一套轮廓判定）
@@ -1022,6 +1023,7 @@ class Game {
     }
     for (const e of this.enemies) {
       if (!e.active || e === hitEnemy) continue;
+      if (e.entryImmune || e.spawnGuard > 0) continue;   // 还没入场的敌机不吃溅射
       if (dist2(b.x, b.y, e.x, e.y) < (r + e.r) * (r + e.r)) e.hit(dmg, null, this);
     }
   }
@@ -1037,6 +1039,7 @@ class Game {
       let bd = 175 * 175;
       for (const e of this.enemies) {
         if (!e.active || chained.indexOf(e) >= 0) continue;
+        if (e.entryImmune || e.spawnGuard > 0) continue;   // 别把跳数浪费在幕布后面的敌机上
         const d = dist2(px, py, e.x, e.y);
         if (d < bd) { bd = d; best = e; }
       }
@@ -1748,8 +1751,19 @@ class Game {
           // P 的占比 72% → 50% → 40%：BOSS 战真正缺的是"那把打不动的枪"的等级，
           // 所以把空出来的权重给 W 比继续堆 P 更解决问题
           this.supplyT = 8.0;
+          /* BOSS 战的空投也改口味：P/W 各让一档，其余给临时增益。
+           * BOSS 战十几秒只有一个目标，临时增益（护盾/追踪弹/宽头弹/僚机）
+           * 在这里的存在感最高——它们是"这 14 秒怎么打"，比再升一级更可感。 */
           const roll = Math.random();
-          const kind = roll < 0.40 ? 'P' : roll < 0.68 ? 'W' : roll < 0.88 ? 'B' : 'H';
+          let kind;
+          if (roll < 0.28) kind = 'P';
+          else if (roll < 0.40) kind = 'W';
+          else if (roll < 0.52) kind = 'B';
+          else if (roll < 0.62) kind = 'H';
+          else {
+            const pool = ['S', 'T', 'D', 'A'].filter(k => TEMP_FROM[k] <= this.level.id);
+            kind = pool.length ? pick(pool) : 'B';
+          }
           this.spawnPickup(rand(56, VIEW.w - 56), -18, kind,
             kind === 'W' ? this._rollWeapon() : 0);
         }
@@ -2099,7 +2113,10 @@ class Game {
 
     this.snakes.push({
       head, segs,
-      total: segs.length,      // 初始节数，暴走判定用（segs 会被 splice 缩短）
+      /* 身体总血量：暴走按"掉了多少血"判定。
+       * 不能按"死了几节"算——关节血量提到接近头之后，死一节要打七八百点伤害，
+       * 数节数的门槛等于要求玩家先啃掉小半条蛇，那条分支基本不会触发。 */
+      bodyMaxHp: segs.reduce((sum, e) => sum + e.maxHp, 0),
       path,
       dir,
       dist: startDist,
@@ -2110,13 +2127,14 @@ class Game {
       fireT: 0.9,
       fireIdx: 0,
       headFireT: 2.2,
-      rage: false,        // 暴走：掉够节数或头血量过半后触发
+      rage: false,        // 暴走：身体掉血三成、或头血量过半后触发
       rageFlash: 0
     });
     // 双蛇是先后 1.1 秒入场的，只让第一条报幕，否则第二次会盖掉第一次
     if (!this.snakes.length) {
       this._bigToast(twin ? 'TWIN SERPENT' : 'SERPENT',
-        twin ? '双蛇 · 打掉两个头才算清场' : '蛇形单位 · 打掉头才算击杀',
+        twin ? '双蛇 · 打身体拿分，打掉两个头才算清场'
+             : '蛇形单位 · 打身体拿分，打掉头才算击杀',
         '#c9a6ff');
       SFX.warn();
     }
@@ -2189,14 +2207,16 @@ class Game {
   _updateOneSnake(dt, s) {
     s.spawnT += dt;
 
-    // 暴走判定：被剪掉足够多身体，或头血量过半 → 提速 + 加射速。
-    // 这样"先剪身体削弱弹幕"就有代价了：剪得越多，剩下的部分越疯。
+    // 暴走判定：身体累计掉血到三成、或头血量过半 → 提速 + 加射速。
+    // 这样"先啃身体刷分"就有代价了：分拿得越多，剩下的部分越疯。
     if (!s.rage) {
-      const lost = s.total - s.segs.length;   // 死掉的节已经被 splice 掉了
-      if (lost >= SNAKE.rage.lostSegs || s.head.hp / s.head.maxHp <= SNAKE.rage.hpRatio) {
+      let bodyHp = 0;
+      for (const e of s.segs) if (e.active) bodyHp += Math.max(0, e.hp);
+      const lostBody = 1 - bodyHp / s.bodyMaxHp;
+      if (lostBody >= SNAKE.rage.lostBody || s.head.hp / s.head.maxHp <= SNAKE.rage.hpRatio) {
         s.rage = true;
         s.rageFlash = 0.6;
-        this._bigToast('SERPENT ENRAGED', '蛇身被剪断 · 速度与射速提升', '#ff7a8a');
+        this._bigToast('SERPENT ENRAGED', '蛇身被啃穿 · 速度与射速提升', '#ff7a8a');
         this.flashT = Math.max(this.flashT, 0.16);
         SFX.warn();
       }
@@ -2375,17 +2395,30 @@ class Game {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // 4) 分节环：不填充，只画环 + 中心核，读作"一节一节的躯体"而不是一串珠子
+    // 4) 分节环：不填充，只画环 + 中心核，读作"一节一节的躯体"而不是一串珠子。
+    //    外圈拆成"底环 + 剩余血量弧"：3.31 起每节 860 血、是明确的计分目标，
+    //    光靠亮度变暗读不出"这节还剩多少"，玩家没法判断该继续压还是换一节。
     for (let i = s.segs.length - 1; i >= 0; i--) {
       const e = s.segs[i];
       if (!e.active) continue;
-      const k = Math.max(0.2, e.hp / e.maxHp);        // 掉血越多越暗
+      const k = clamp(e.hp / e.maxHp, 0, 1);
+      const rr = e.r * 0.84;
+
       ctx.beginPath();
-      ctx.arc(e.x, e.y, e.r * 0.84, 0, Math.PI * 2);
-      ctx.strokeStyle = e.flash > 0 ? '#ffffff'
-        : 'rgba(' + cRing + ',' + (0.32 + 0.50 * k).toFixed(2) + ')';
+      ctx.arc(e.x, e.y, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = e.flash > 0 ? '#ffffff' : 'rgba(' + cRing + ',0.20)';
       ctx.lineWidth = 1.8;
       ctx.stroke();
+
+      // 血量弧：从正上方顺时针，长度就是剩余血量（满血即整圈）
+      if (k > 0.02) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k);
+        ctx.strokeStyle = e.flash > 0 ? '#ffffff'
+          : 'rgba(' + cRing + ',' + (0.34 + 0.46 * k).toFixed(2) + ')';
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      }
 
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.r * 0.28, 0, Math.PI * 2);
@@ -2705,6 +2738,10 @@ class Game {
 
       for (const e of this.enemies) {
         if (!e.active) continue;
+        /* 还没入场的敌机：子弹直接穿过，既不打伤害也不消耗子弹。
+         * 若只靠 hit() 里 return，子弹会被"看不见的敌机"吃掉，
+         * 玩家看到的是弹幕凭空消失——比打不死更难受。 */
+        if (e.entryImmune || e.spawnGuard > 0) continue;
         if (b.pierce && b.hits.indexOf(e) >= 0) continue;
         if (dist2(b.x, b.y, e.x, e.y) < (e.r + b.r) * (e.r + b.r)) {
           if (b.pierce) b.hits.push(e);
@@ -2837,6 +2874,8 @@ class Game {
     // 敌机撞机
     for (const e of this.enemies) {
       if (!e.active) continue;
+      // 入场保护期内当它是"还在幕布后面"：撞不到玩家，也吃不到撞机伤害
+      if (e.entryImmune || e.spawnGuard > 0) continue;
       // 从底部升起的单位在爬升阶段穿过屏幕，玩家常挡在路径上。
       // 不豁免的话 miniboss 会直接撞死自己，玩家也白掉命。
       // 但冲角型小 BOSS 的俯冲是**朝下**冲过玩家，那一段必须能撞到，
@@ -2846,9 +2885,9 @@ class Game {
       if (dist2(p.x, p.y, e.x, e.y) < (PLAYER.hitR + e.r * 0.8) * (PLAYER.hitR + e.r * 0.8)) {
         // 冲角型不因撞机自毁：它是唯一主动撞上来的单位，
         // 如果撞到就死，"被撞一下顺手换掉一个小 BOSS"会变成最优解
-        // 蛇头同样不吃撞机伤害：999 打在 1000 血的头上等于"撞一下就剩 1 血"，
-        // 那条命换的血量太离谱。撞上去只惩罚玩家，蛇本身当墙处理。
-        if (!ramming && e.kind !== 'snakeHead') e.hit(999, null, this);
+        // 整条蛇（头 + 关节）都不吃撞机伤害：999 打在头上等于"撞一下剩 1 血"，
+        // 打在关节上则是一条命换一节的分。撞上去只惩罚玩家，蛇本身当墙处理。
+        if (!ramming && e.ai !== 'snake') e.hit(999, null, this);
         if (this.god) continue;
         p.hit(this);
         if (!p.alive) return;
