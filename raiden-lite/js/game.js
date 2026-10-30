@@ -1505,6 +1505,10 @@ class Game {
       // 下限 3.5 是为了不让最小的弹变成"完全打不中"。
       r: Math.max(3.5, (opt.r || 6) * ENEMY_BULLET_HIT_K),
       ay: opt.ay || 0,
+      // 伤害：0 = 未指定，命中时按判定半径回落到 PLAYER.bulletDmg / bulletDmgBig。
+      // 需要"这种弹比别人疼"（狙击弹）时才显式传，别在这里定默认值，
+      // 否则每加一种弹幕都要重新对一遍全局数值。
+      dmg: opt.dmg || 0,
       // 狙击弹必须显式透传：不透传的话它会退化成一颗普通慢弹，
       // 永远不加速——和 wideBlock 那次是同一类静默失效
       snipe: opt.snipe,
@@ -2935,9 +2939,11 @@ class Game {
       if (dist2(b.x, b.y, p.x, p.y) < (PLAYER.hitR + b.r) * (PLAYER.hitR + b.r)) {
         b.active = false;
         if (this.god) continue;
+        // 伤害优先级：弹自己带 dmg 就用它（狙击弹 46），否则按判定半径分档——
         // b.r 是已经乘过 ENEMY_BULLET_HIT_K 的判定半径：视半径 14 的大弹算下来 ≈10，
         // 所以用 9 当"大弹"门槛，小/中弹（4.3 / 7.2）统一按普通弹算
-        p.hit(this, b.r >= 9 ? PLAYER.bulletDmgBig : PLAYER.bulletDmg);
+        p.hit(this, b.dmg > 0 ? b.dmg
+          : (b.r >= 9 ? PLAYER.bulletDmgBig : PLAYER.bulletDmg));
         if (!p.alive) return;
       }
     }

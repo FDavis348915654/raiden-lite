@@ -1973,9 +1973,12 @@ class Enemy {
       // 狙击弹：0.62 秒慢速滑行 + 沿发射方向猛加速。
       // 初速只有 96，这段时间足够玩家看清准星环并横移——
       // 它是"读招"型威胁，不是"反应不过来"型威胁。
+      // 所以惩罚放在"站着不动"上：伤害单独走 PLAYER.snipeDmg（46），
+      // 比普通弹重得多，躲开则零代价（3.38）。
       const sy = this.y + this.r * 0.72;
       game.spawnEnemyBullet(bx, sy, Math.cos(ang) * 96, Math.sin(ang) * 96, {
-        kind: 'enemyAlt', r: 7, life: 9, snipe: { delay: 0.62, speed: 720 }
+        kind: 'enemyAlt', r: 7, life: 9, dmg: PLAYER.snipeDmg,
+        snipe: { delay: 0.62, speed: 720 }
       });
       SFX.snipeCharge();
     } else if (mode === 'fan3') {
