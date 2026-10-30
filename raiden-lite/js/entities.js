@@ -205,6 +205,9 @@ class Pickup {
     this.y = y;
     this.kind = kind;                 // P 火力 / W 武器 / B 保险 / H 生命 / O 僚机
     this.weapon = weapon || 0;        // 仅 W 有效：这把道具固定对应的武器索引
+    /* 仅 W 有效：接回来时的等级（0 = 不指定，按"接主武器等级"的常规规则）。
+     * 玩家被打爆时散落的武器会带 lv-1，捡回来比原来低一级。 */
+    this.lv = opt.lv || 0;
     this.t = 0;
     this.age = 0;
     this.vx = rand(-40, 40);
@@ -325,10 +328,14 @@ class Pickup {
     ctx.lineWidth = 2;
     ctx.stroke();
     ctx.fillStyle = c;
-    ctx.font = 'bold 13px monospace';
+    /* 单字符的走 13px，多字符（1UP）缩到 8px：半径 11 的圆里
+     * 三字符按 9px 排会顶到描边上，糊成一团。 */
+    const label = this.kind === 'W' ? WEAPONS[this.weapon].name.charAt(0)
+      : (this.kind === 'E' ? '1UP' : this.kind);
+    ctx.font = 'bold ' + (label.length > 1 ? 8 : 13) + 'px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(this.kind === 'W' ? WEAPONS[this.weapon].name.charAt(0) : this.kind, 0, 1);
+    ctx.fillText(label, 0, 1);
     ctx.restore();
 
     // 反弹瞬间的冲击环：让"撞到底边被弹回来"这件事看得见
@@ -352,8 +359,11 @@ class Pickup {
 const PICKUP_COLORS = {
   P: '#66e0ff', W: '#ffc857', B: '#7dff9e', H: '#ff7a8a',
   O: '#a8f4ff', R: '#ff8ce0', L: '#b48cff',
+  // 加命：白金。全场唯一的"多一条命"，配色要比其它道具亮一档才对得起稀有度
+  E: '#fff2b0',
   // 临时增益：统一走冷色/暖色两套，和上面的"永久成长"道具区分开
-  S: '#9fe8ff', T: '#ffa060', D: '#7bffcf', A: '#c9b0ff'
+  // 雷电单独给紫白：它是"落雷"不是"射击"，玩家得一眼认出和电弧炮不是一回事
+  S: '#9fe8ff', T: '#ffa060', D: '#7bffcf', A: '#c9b0ff', Z: '#c6a2ff'
 };
 
 /* ---------------------------------------------------------------- 玩家 */
@@ -366,6 +376,8 @@ class Player {
   reset() {
     this.lives = PLAYER.lives;
     this.bombs = PLAYER.bombs;
+    this.maxHp = PLAYER.hp;
+    this.hp = this.maxHp;
     /* 火力等级改为**按槽独立**：lv[i] 和 weapons[i]/slotT[i] 并行，长度必须一致。
      * 三条会改变它的路径：
      *   P 道具  → 所有已装武器各 +1（不占玩家决策，成长主线）
@@ -391,7 +403,8 @@ class Player {
     this.y = PLAY_BOTTOM - 80;
     this.canFire = true;             // 结算期关掉，避免空放子弹糊住 UI
     this.boostT = 0;                 // 全弹发射后的射速强化剩余时间
-    this.invuln = 2.2;
+    this.invuln = PLAYER.respawnInvuln;
+    this.hp = this.maxHp;            // 换关补满血：新关开场就被上一关的残血拖死太难读
     this.fireT = 0;
     this.alive = true;
     this.t = 0;
@@ -596,7 +609,7 @@ class Player {
   /** 吃 S：护盾。重复吃 → 时间与耐久都补满，不叠加 */
   gainShield(game) {
     const C = TEMP.shield;
-    this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0 };
+    this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0, jit: 0 };
     game.onTempGain(this, 'shield');
   }
 
@@ -628,6 +641,7 @@ class Player {
     if (sh) {
       sh.t -= dt;
       if (sh.hitT > 0) sh.hitT -= dt;
+      if (sh.jit > 0) sh.jit -= dt;      // 挡弹抖动的衰减（只影响绘制，不影响判定）
       if (sh.t <= 0 || sh.hp <= 0) {
         this.shield = null;
         game.onTempEnd(this, 'shield');
@@ -645,8 +659,10 @@ class Player {
       } else if (this.canFire) {
         tw.cd -= dt;
         if (tw.cd <= 0) {
-          this._fireTemp(game, tw);
-          tw.cd = TEMP[tw.id].cd;
+          /* _fireTemp 返回"下一次可开火要等多久"：追踪/宽头弹是固定射速，
+           * 雷电在周围没敌人时会返回一个极短的 retry——它不该空转一整个 cd，
+           * 否则敌人刚飞进圈也得干等 0.4 秒才挨第一下。 */
+          tw.cd = this._fireTemp(game, tw);
         }
       }
     }
@@ -664,7 +680,8 @@ class Player {
     }
   }
 
-  /** 临时武器开火：不占槽、不吃 SLOT_DMG，也不进错峰队列（本身射速就慢） */
+  /** 临时武器开火：不占槽、不吃 SLOT_DMG，也不进错峰队列（本身射速就慢）。
+   *  返回下一次开火的等待时间，见 _updateTemp。 */
   _fireTemp(game, tw) {
     if (tw.id === 'track') {
       const C = TEMP.track;
@@ -672,13 +689,37 @@ class Player {
         kind: 'track', r: C.r, homing: C.homing, life: 3,
         boom: { r: C.boomR, dmg: C.boomDmg }
       });
-    } else {
-      const C = TEMP.wide;
-      game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
-        kind: 'wide', r: C.r, life: 1.6, wideBlock: true
-      });
+      SFX.shoot();
+      return C.cd;
     }
+    if (tw.id === 'thunder') {
+      const C = TEMP.thunder;
+      /* 雷电和另外两把临时武器的根本区别：**不是"到点就放"**。
+       * 它先问"周围有没有敌人"，没有就静默，连音效都不出——
+       * 否则满屏都是雷声，玩家分不清"现在真的在打"还是"它自己在响"。
+       * 目标判定只认已经入场的敌机（entryImmune / spawnGuard 豁免），
+       * 和 chainLightning 内部一致，不然第一跳会打在幕布后面的隐形机上。 */
+      let best = null;
+      let bd = C.range * C.range;
+      for (const e of game.enemies) {
+        if (!e.active || e.entryImmune || e.spawnGuard > 0) continue;
+        const d = dist2(this.x, this.y, e.x, e.y);
+        if (d < bd) { bd = d; best = e; }
+      }
+      if (!best) return C.retry;
+      game.chainLightning(this.x, this.y - 16, null, C.hops, C.dmg, {
+        first: best, firstR: C.range, radius: C.jumpR,
+        falloff: C.falloff, minDmg: C.minDmg, color: C.color
+      });
+      SFX.thunder();
+      return C.cd;
+    }
+    const C = TEMP.wide;
+    game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
+      kind: 'wide', r: C.r, life: 1.6, wideBlock: true
+    });
     SFX.shoot();
+    return C.cd;
   }
 
   /** 临时僚机：只跟主槽，伤害 0.6、射速再压一档，不能盖过正式僚机 */
@@ -922,12 +963,20 @@ class Player {
   /** 吃到 W 道具：已有的那把**自己升一级**，没有则占一个空槽
    *  （满级再吃同款 → 全弹发射）。这是"独立等级"里的主动成长线：
    *  P 只能全槽齐涨，想把这把枪先推到满级、先解锁它的全弹发射，就得专喂它 W。 */
-  addWeapon(idx, game) {
+  addWeapon(idx, game, lv) {
     idx = ((idx % WEAPONS.length) + WEAPONS.length) % WEAPONS.length;
     const exist = this.weapons.indexOf(idx);
 
     if (exist >= 0) {
       const cur = this.lv[exist] || PLAYER.startPower;
+      /* 带 lv 的 W 只来自"爆机散落"：直接回到那一档，不再叠 +1。
+       * 否则主武器（散落时必然还在 0 号位）会被当成"又吃到一把同款"，
+       * 捡回来只回到 L(原-2)，玩家会觉得捡了个寂寞。已经更高就不动。 */
+      if (lv) {
+        this.lv[exist] = Math.max(cur, clamp(lv, 1, PLAYER.maxPower));
+        game.onWeaponDup(this, idx, this.lv[exist]);
+        return 'dup';
+      }
       if (cur >= PLAYER.maxPower) {
         this.overdrive(game);        // 满级重复吃同款：全弹发射
         return 'overdrive';
@@ -937,8 +986,15 @@ class Player {
       return 'dup';
     }
 
-    // 新枪入场直接接主武器等级：第 7 关捡到一把 L1 的枪等于没捡，玩家会直接放弃它
-    const entry = Math.min(PLAYER.maxPower, this.lv[0] || PLAYER.startPower);
+    /* 新枪一律从 L1 开始（3.36）。
+     * 以前入场直接接主武器等级，结果是"捡到新枪 = 白捡一把满级枪"：
+     * 换枪没有任何养成成本，9 把武器只是 9 个换着玩的皮肤，
+     * 每把枪独立的等级系统也就形同虚设。
+     * 现在新枪得自己吃 W 慢慢升——想用一把枪就得一直用它，
+     * "专精"这件事才第一次成立。
+     * 唯一的例外是 `lv` 有值：那来自"爆机散落的自己的枪"，
+     * 要按掉落时的档位直接接上（散落已经降过一级，再回到 L1 等于双倍惩罚）。 */
+    const entry = lv ? clamp(lv, 1, PLAYER.maxPower) : 1;
     if (this.weapons.length < WEAPON_SLOTS) {
       this.weapons.push(idx);
       this.slotT.push(0);
@@ -1032,7 +1088,7 @@ class Player {
     game.onOverdrive(this);
   }
 
-  /** 续关复活：原地满血回来，保留火力/武器/保险 */
+  /** 续关复活：满血回来，保留火力/武器/保险 */
   revive() {
     this.alive = true;
     this.lives = CONTINUE.lives;
@@ -1041,6 +1097,7 @@ class Player {
     // 激光保险不补满（6 秒无敌 ×3 太强），只给一颗保底
     this.lasers = Math.max(this.lasers, 1);
     this.invuln = CONTINUE.invuln;
+    this.hp = this.maxHp;
     this.canFire = true;
     this.boostT = 0;
     this.fireT = 0.25;
@@ -1050,42 +1107,76 @@ class Player {
     this.t = 0;
   }
 
-  hit(game) {
+  /** 重生：被打爆后重新放一架"裸机"回战场（剩余命数不在这里改，扣命是 _destroy 做的）。
+   *  火力/武器/保险全部回到开局状态（装备已经作为道具散落在爆机点了，
+   *  接不接得回来靠玩家自己跑过去），僚机与环绕机同理。 */
+  respawn() {
+    this.alive = true;
+    this.canFire = true;
+    this.hp = this.maxHp;
+    this.invuln = PLAYER.respawnInvuln;
+    this.boostT = 0;
+    this.fireT = 0.25;
+    this.shotQ = [];
+    this.x = VIEW.w / 2;
+    this.y = PLAY_BOTTOM - 80;
+    this.t = 0;
+    this.weapons = [0];
+    this.lv = [PLAYER.startPower];
+    this.slotT = [0];
+    this.options = [];
+    this.orbits = [];
+    this.orbitBoostT = 0;
+    this.bombs = PLAYER.bombs;
+    this.lasers = 0;
+    this.shield = null;
+    this.tempWpn = null;
+    this.tempAlly = null;
+  }
+
+  /** 挨打：先掉血，血掉完才炸机扣命。
+   *  dmg 由调用点按来源给（普通弹 26 / 大弹 34 / 撞机 40），不传就按普通弹算。 */
+  hit(game, dmg) {
     if (this.invuln > 0 || !this.alive) return false;
-    this.lives -= 1;
-    this.invuln = PLAYER.invuln;
-    /* 掉血 = 所有武器槽各降一级（3.28 起）。
-     * 代价按"每把枪"算而不是只砍主武器：四槽齐掉一级，满级被打回 4 级，
-     * 一次失误就能听出火力变薄——这是本作唯一会让"已经赚到的成长"倒退的惩罚，
-     * 也是独立等级真正被玩家感知到的时刻。
-     * 致命一击（剩余命数 0）不再额外掉级：命都没了，续关回来还得能打。 */
-    if (this.lives > 0) {
-      for (let i = 0; i < this.lv.length; i++) {
-        this.lv[i] = Math.max(1, this.lv[i] - 1);
-      }
-    }
+    this.hp -= (dmg === undefined ? PLAYER.bulletDmg : dmg);
+    this.invuln = PLAYER.hitInvuln;
     SFX.playerHit();
     /* 受击反馈：震屏给到 0.46 秒（默认 0.32 太短，玩家还没意识到挨枪就结束了），
      * 半径 18 震不出"被撞了一下"的重量感；爆炸也放大一圈，让机位一眼可见。 */
     game.shake(26, 0.46);
     game.onPlayerHurt();
-    game.explode(this.x, this.y, 1.6, '#7fd6ff', 36);
-    if (this.lives <= 0) {
-      this.alive = false;
-      this.canFire = false;
-      // 临时增益不跟到续关：护盾/临时武器/僚机是"这一段战斗的战术优势"，
-      // 带着它们复活等于把一条命的价值翻倍
-      this.shield = null;
-      this.tempWpn = null;
-      this.tempAlly = null;
-      game.onPlayerDying();
+    // 掉血也要有机体反馈：小爆炸 + 闪白，否则玩家只看 HUD 血条会"不知道自己挨了"
+    game.explode(this.x, this.y, 0.9, '#7fd6ff', 14);
+    if (this.hp <= 0) {
+      this.hp = 0;
+      this._destroy(game);
     }
     return true;
   }
 
+  /** 血掉光：扣命 + 把身上的装备变成道具散落，机体交给 Game 走"爆炸 → 重生/结算" */
+  _destroy(game) {
+    this.alive = false;
+    this.canFire = false;
+    this.lives -= 1;
+    /* 最后一架不散落：这一局已经结束，掉落没人能捡，只会在结算页后面飘着；
+     * 而且续关（revive）按老规矩保留火力，散落了反而变成"原地多出一份装备"。 */
+    if (this.lives > 0) game.dropLoadout(this);
+    // 临时增益不跟到新命：护盾/临时武器/临时僚机是"这一段战斗的战术优势"
+    this.shield = null;
+    this.tempWpn = null;
+    this.tempAlly = null;
+    this.options = [];
+    this.orbits = [];
+    game.onPlayerDying();
+  }
+
   draw(ctx) {
     if (!this.alive) return;
-    const blink = this.invuln > 0 && Math.floor(this.t * 22) % 2 === 0;
+    /* 血量制之后每次中弹只有 hitInvuln（1.2s）无敌，若每次都按 22Hz 闪，
+     * 弹幕密的时候机身在半秒里"半隐身"，反而看不清自己的位置。
+     * 所以只有"重生 / 续关 / 保险"这种长无敌才闪，短无敌靠下面那圈护罩表达。 */
+    const blink = this.invuln > PLAYER.hitInvuln && Math.floor(this.t * 22) % 2 === 0;
 
     // 引擎尾焰（随机体一起缩小：原 26px 长、±8 宽，比机身还抢眼，也更难看清判定）
     ctx.save();
@@ -1127,7 +1218,7 @@ class Player {
       ctx.restore();
     }
 
-    /* 无敌护罩：受击后 2.8 秒，玩家必须能一眼看出"现在吃弹不疼"。
+    /* 无敌护罩：受击 / 重生 / 保险期间，玩家必须能一眼看出"现在吃弹不疼"。
      * 单圈细线在弹幕里会被误当成背景装饰，改成内实外虚的双层环 + 反向旋转；
      * 最后 0.6 秒开始闪烁，提示无敌即将结束（否则玩家会按"还在无敌"去撞弹）。 */
     if (this.invuln > 0) {
@@ -1165,8 +1256,17 @@ class Player {
     const s = this.shield;
     if (!s) return;
     const C = TEMP.shield;
-    const cx = this.x;
-    const cy = this.y - C.oy;
+    /* 挡弹抖动：盾面整体抖，机身不动。
+     * 判定用的是 Player.x/y 原值，这里只挪画面——所以"抖"不会让玩家的
+     * 手感边界发生变化（差 3px 就躲过/没躲过一颗弹，是这套玩法最不能漂移的东西）。 */
+    let jx = 0, jy = 0;
+    if (s.jit > 0) {
+      const k = s.jit / C.jit;
+      jx = rand(-1, 1) * C.jitAmp * k;
+      jy = rand(-1, 1) * C.jitAmp * k * 0.55;   // 纵向收一半：横向"震"，纵向"晃"
+    }
+    const cx = this.x + jx;
+    const cy = this.y - C.oy + jy;
     const k = Math.max(0, s.hp / s.max);            // 1 → 0
     const hot = s.hitT > 0;
     const rgb = hot ? '255,255,255'
@@ -1493,6 +1593,20 @@ class Enemy {
     this.deflectHp = def.deflect ? def.deflect.cap : 0;
     this.deflectDown = 0;
     this.dflash = 0;
+    /* 出场护盾（见 ENEMY_SHIELD）。计时不从这里开始，而是等入场保护结束
+     * （entryDone 且 entryBuf 归零）——否则从底部升起的单位会把护盾全烧在
+     * 屏幕外那段爬升里，玩家看到的是"一冒头盾就没了"。
+     * 池对象必须逐项复位：漏一个就会出现"这一只没配置护盾、却顶着上一只的盾"。 */
+    /* BOSS 召唤的援军一律不给盾：它们是"量"不是"质"，每只 55 血的小 BOSS
+     * 套一层 180 血的壳，会让整段召唤节奏变成一堵墙。 */
+    const es = opt.summoned ? null : ENEMY_SHIELD[this.kind];
+    const smul = opt.shieldMul === undefined ? 1 : opt.shieldMul;
+    this.shieldMax = es ? Math.round(es.hp * smul) : 0;
+    this.shieldHp = this.shieldMax;
+    this.shieldDur = es ? es.dur : 0;
+    this.shieldT = es ? es.dur : 0;
+    this.shieldHit = 0;      // 吸收伤害后的白闪
+    this.shieldBreak = 0;    // 破盾瞬间的爆闪
     // 冲角型小 BOSS：0 巡游 / 1 锁定 / 2 俯冲 / 3 归位
     this.ramState = 0;
     this.ramT = 0;
@@ -1523,6 +1637,16 @@ class Enemy {
         this.deflectDown = 0;
         this.deflectHp = this.def.deflect ? this.def.deflect.cap : 0;
       }
+    }
+
+    if (this.shieldHit > 0) this.shieldHit -= dt;
+    if (this.shieldBreak > 0) this.shieldBreak -= dt;
+    /* 出场护盾：入场保护（免疫 + 缓冲）彻底结束才开始倒计时。
+     * 这样"保护 → 护盾"是连续的两段，玩家不会看到"能打了但盾已经没了"；
+     * 从底部升起的单位也不会把整段护盾烧在屏幕外。 */
+    if (this.shieldHp > 0 && !this.entryImmune && this.spawnGuard <= 0) {
+      this.shieldT -= dt;
+      if (this.shieldT <= 0) this._dropShield(game, false);
     }
 
     // 蛇的部件：位置由 game._updateSnake 沿路径统一写入，
@@ -1969,8 +2093,49 @@ class Enemy {
     return !this.entryDone || this.entryBuf > 0;
   }
 
-  hit(dmg, bullet, game) {
-    if (this.spawnGuard > 0 || this.entryImmune) return;   // 登场保护期内免疫
+  /** 卸下护盾。broken=true 是被打穿（给爆闪 + 碎裂音 + 轻震屏），
+   *  false 是计时到点自然消散（只留一圈淡光）——否则玩家会觉得
+   *  "我没打它，它自己炸了一下"，反而读不懂发生了什么。 */
+  _dropShield(game, broken) {
+    const x = this.x, y = this.y;
+    this.shieldHp = 0;
+    this.shieldT = 0;
+    if (!broken) {
+      this.shieldBreak = 0.18;
+      return;
+    }
+    this.shieldBreak = 0.30;
+    if (!game) return;
+    game.explode(x, y, 1.0, '#a8ecff', 14);
+    /* 震屏只给小 BOSS：后期同屏十几只中型机，每只破盾都震一下，
+     * 屏幕会变成持续抖动，比"打不中"更难受。中型机的破盾靠粒子 + 音效就够了。 */
+    if (isMiniKind(this.kind)) game.shake(5, 0.12);
+    SFX.shieldBreak();
+  }
+
+  hit(dmg, bullet, game, opt) {
+    if (this.spawnGuard > 0 || this.entryImmune) return false;   // 登场保护期内免疫
+    /* 出场护盾：先吃伤害、本体不掉血，打空才轮到真伤。
+     * 溢出不传递：护盾的意义是"挡住一次爆发"，如果一发大弹能打穿薄盾顺带带走
+     * 半条血，护盾在小 BOSS 身上就只剩一个延迟数字。
+     * ignoreShield 给"物理/规则层面"的伤害用（保险清屏、撞机）——
+     * 那些不该由一层能量盾决定结果。dmg >= 500 兜底，防止新调用点漏传参数。 */
+    const pierce = (opt && opt.ignoreShield) || dmg >= 500;
+    if (this.shieldHp > 0 && !pierce) {
+      this.shieldHp -= dmg;
+      this.shieldHit = 0.14;
+      if (game) {
+        // 火花打在盾面上而不是机体中心：玩家要能看出"打中的是盾"
+        const a = Math.random() * Math.PI * 2;
+        game.addParticle(this.x + Math.cos(a) * this.r * 0.9,
+          this.y + Math.sin(a) * this.r * 0.9, {
+            vx: rand(-50, 50), vy: rand(-70, -10), life: 0.22, r: 3,
+            color: '#cdf4ff'
+          });
+      }
+      if (this.shieldHp <= 0) this._dropShield(game, true);
+      return false;
+    }
     // 护盾机：从下方打过来的子弹（正面）只吃 15% 伤害
     if (this.kind === 'shield' && bullet && bullet.y > this.y + this.h * 0.12) {
       dmg *= 0.15;
@@ -2062,6 +2227,65 @@ class Enemy {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       Assets.draw(ctx, this.sprite, this.x, this.y, s, 0.55);
+      ctx.restore();
+    }
+
+    // 出场护盾：包住机体的六边形能量壳 + 外圈耐久弧。
+    // 用六边形而不是圆，是为了和另外两圈区分开——入场保护是细圆环、
+    // 玩家护盾是半椭圆，"能打穿的六边形壳"看一眼就知道是另一种东西。
+    /* 入场保护期间不画护盾：那一段有自己的淡青细环，两圈叠在一起会读成噪点。
+     * 护盾从"能被打中"的那一刻（entryImmune 结束）才出现，和计时起点一致——
+     * 玩家看到的和判定用的是同一个时间点，不会出现"盾还没亮就先吸收了伤害"。 */
+    if ((this.shieldHp > 0 && !this.entryImmune && this.spawnGuard <= 0) || this.shieldBreak > 0) {
+      const alive = this.shieldHp > 0;
+      const k = alive ? this.shieldHp / this.shieldMax : 0;
+      const fade = alive ? 1 : clamp(this.shieldBreak / 0.30, 0, 1);
+      // 半径取 r 而不是贴图外接盒：护盾是"能量壳"，跟着判定体走才对得上手感。
+      // 纵向多给 18%，本作敌机多数是竖着的；正六边形套细长机身会横向撑得比机身宽，
+      // 编队密集时十几个六边形连成一片，反而比不加盾更看不清机体。
+      const R = this.r * 1.45 + 9;
+      const RY = R * 1.18;
+      const a0 = this.t * 0.8;
+      const hexPath = (rx, ry) => {
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a = a0 + i * Math.PI / 3;
+          const px = this.x + Math.cos(a) * rx;
+          const py = this.y + Math.sin(a) * ry;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+      };
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      // 壳面：越接近破碎越亮，读作"这层撑不住了"
+      hexPath(R, RY);
+      // 破盾瞬间整块转白并淡出，而不是"啪一下消失"
+      ctx.fillStyle = alive
+        ? 'rgba(130,220,255,' + ((0.05 + (1 - k) * 0.08) * fade).toFixed(3) + ')'
+        : 'rgba(220,250,255,' + (0.20 * fade).toFixed(3) + ')';
+      ctx.fill();
+
+      // 棱边：受击那一下整圈闪白，比任何血条都直接
+      ctx.strokeStyle = this.shieldHit > 0 ? '#ffffff'
+        : (alive ? 'rgba(170,235,255,' + (0.22 + 0.30 * k).toFixed(2) + ')'
+          : 'rgba(230,250,255,' + (0.50 * fade).toFixed(2) + ')');
+      ctx.lineWidth = this.shieldHit > 0 ? 2.2 : 1.3;
+      ctx.stroke();
+
+      // 耐久弧：外圈一段从 12 点顺时针的弧，长度就是剩余护盾量。
+      // 它比六边形更该被看见——"还能撑多久"是玩家要不要换目标的唯一依据，
+      // 所以画在棱边外面、加粗、alpha 下限也更高。
+      if (alive && k > 0.02) {
+        ctx.beginPath();
+        ctx.ellipse(this.x, this.y, R + 4, RY + 4, 0,
+          -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k);
+        ctx.strokeStyle = 'rgba(190,240,255,' + (0.34 + 0.40 * k).toFixed(2) + ')';
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -2168,6 +2392,17 @@ class Enemy {
       ctx.fillRect(x - 1, y - 1, w + 2, 5);
       ctx.fillStyle = this.elite ? '#ffd166' : '#ff6b6b';
       ctx.fillRect(x, y, w * (this.hp / this.maxHp), 3);
+      /* 小 BOSS 的护盾条单独一条，压在血量条上方：
+       * 护盾期血量条一直是满格，只画血条会被读成"打了半天没反应"。
+       * 中型机不画——它们平时不显示血条，为一道 4 秒的盾把整屏血条都点亮
+       * 反而吵；那一档交给机体外面的六边形壳表达。 */
+      if (isMiniKind(this.kind) && this.shieldHp > 0) {
+        const sw = w * (this.shieldHp / this.shieldMax);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(x - 1, y - 6, w + 2, 4);
+        ctx.fillStyle = '#8fe0ff';
+        ctx.fillRect(x, y - 5, sw, 2);
+      }
     }
   }
 }

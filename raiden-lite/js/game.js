@@ -36,6 +36,12 @@ class Game {
     this.levelIdx = 0;
     this.level = LEVELS[0];
     this.score = 0;
+    /* 最高分：只存本机 localStorage。读不到的场合（隐私模式 / 禁用存储）
+     * 就当 0 处理，绝不能让一个记录分数把整个游戏搞崩。 */
+    this.hiScore = this._loadHiScore();
+    this.hiSaveT = 0;                // 存档节流：破纪录时每秒最多写一次
+    this.hiBeatT = 0;                // 破纪录高亮剩余时间
+    this.nextLifeScore = SCORE_1UP.first;   // 下一次分数奖励的分数线（见 _updateScoreLife）
     this.stageT = 0;
     this.totalT = 0;
 
@@ -79,7 +85,8 @@ class Game {
     this.optToastT = 0;              // 僚机提示
     this.orbitToastT = 0;            // 环绕机提示
     this.laserBeam = { state: 0, t: 0, tickT: 0 };   // 玩家激光保险
-    this.deathDelayT = 0;            // 阵亡后到结算页的倒计时
+    this.deathDelayT = 0;            // 被打爆后到"重生 / 结算页"的倒计时
+    this.respawnPending = false;     // 这次的死亡延迟结束时该重生还是进结算
     this.orbitBoostHint = false;     // 该提示是满员加速
     this.mirrorToastT = 0;           // 镜像武器提示
     this.splitToastT = 0;            // 分裂提示
@@ -284,8 +291,8 @@ class Game {
     // 方便单独测某一种道具（比如连着点几次就能试出僚机上限）
     // 临时增益各放 2 个：它们的正确性（护盾挡弹、宽头弹吞弹、临时僚机开火）
     // 必须能连着点两下就测到，不能指望掉落运气
-    const pool = ['P', 'P', 'P', 'P', 'W', 'W', 'B', 'H', 'H', 'O', 'R', 'R', 'L',
-      'S', 'S', 'T', 'T', 'D', 'D', 'A', 'A'];
+    const pool = ['P', 'P', 'P', 'P', 'W', 'W', 'B', 'H', 'H', 'O', 'R', 'R', 'L', 'E',
+      'S', 'S', 'T', 'T', 'D', 'D', 'Z', 'Z', 'A', 'A'];
     const n = randInt(3, 6);
     const y = Math.max(120, p.y - 84);
     // 标题页也能点补给，此时 this.level 还没建
@@ -531,6 +538,7 @@ class Game {
     // 直接跳过去玩家根本看不清结算和致谢
     if (this.state === 'win' && this.winT < WIN_INPUT_LOCK) return;
     this.score = 0;
+    this.nextLifeScore = SCORE_1UP.first;   // 新一局重新排队分数线，别把上局的进度带进来
     this.continues = CONTINUE.max;
     this.contT = 0;
     this.startLevel(this.startIndex, false);
@@ -619,7 +627,8 @@ class Game {
     this.optToastT = 0;              // 僚机提示
     this.orbitToastT = 0;            // 环绕机提示
     this.laserBeam = { state: 0, t: 0, tickT: 0 };   // 玩家激光保险
-    this.deathDelayT = 0;            // 阵亡后到结算页的倒计时
+    this.deathDelayT = 0;            // 被打爆后到"重生 / 结算页"的倒计时
+    this.respawnPending = false;     // 这次的死亡延迟结束时该重生还是进结算
     this.orbitBoostHint = false;     // 该提示是满员加速
     this.mirrorToastT = 0;           // 镜像武器提示
     this.splitToastT = 0;            // 分裂提示
@@ -664,9 +673,11 @@ class Game {
     this.boss.jitter(14);
   }
 
-  /** 致命伤：先播爆炸，PLAYER.deathDelay 秒后才真正进结算页 */
+  /** 被打爆：先播爆炸，PLAYER.deathDelay 秒后重生；没有余命才进结算页 */
   onPlayerDying() {
     this.deathDelayT = PLAYER.deathDelay;
+    // 还有余命 → 这次延迟结束时重生；命数已经归零 → 进失败页/续关
+    this.respawnPending = this.player.lives > 0;
     this._dyingT = 0;
     this._dyingBurst = 0;
     this._dyingX = this.player.x;
@@ -688,11 +699,36 @@ class Game {
     SFX.explode(true);
   }
 
+  /** 重生：从底部中央放一架裸机回来，顺手清屏（和续关同一套理由——
+   *  不清的话出生点可能正对着上一命的弹幕，等于白送一条命）。 */
+  respawnPlayer() {
+    for (const b of this.bullets) {
+      if (b.active && !b.friendly) {
+        b.active = false;
+        this.addParticle(b.x, b.y, {
+          vx: rand(-50, 50), vy: rand(-50, 50), life: 0.26, r: 4, color: '#ffffff'
+        });
+      }
+    }
+    this.bombDrops.length = 0;
+    this.bombCdT = 0;
+    this.laserCdT = 0;
+    this.player.respawn();
+    input.pointerActive = false;
+    input.pointerId = -1;
+    this.flashT = Math.max(this.flashT, 0.22);
+    this.shake(10);
+    // 必须明说"火力从零开始"：玩家看到自己满屏弹幕突然变成一条，第一反应是掉级 bug
+    this._bigToast('RESPAWN', '新机已部署 · 火力归零，去捡回散落的装备', '#8fe8ff');
+    SFX.continueRun();
+  }
+
   onPlayerDead() {
     SFX.gameOver();
     this.state = 'gameover';
     this.overT = 0;
     this.deadT = 0;
+    this._saveHiScore();             // 先落盘再给玩家看结算页，避免关页面丢纪录
     this.deathBoss = this.bossActive && !!this.boss && !this.boss.dead;
     if (this.boss && this.boss.laserState > 0) {
       this.boss.laserState = 0;
@@ -832,7 +868,9 @@ class Game {
     // 掉落奖励：P 从 3 瓶降到 2 瓶。4 瓶就能把四把枪顶到满级，
     // 每关结尾再白送 3 瓶的话，击杀掉落压得再低也没有意义。
     for (let i = 0; i < 2; i++) this.spawnPickup(b.x + rand(-70, 70), b.y + rand(-30, 30), 'P');
-    if (this.player.lives < 3) this.spawnPickup(b.x, b.y + 30, 'H');
+    /* 残血才补一瓶 H（3.33：H 是回血，所以判据从"命少"改成"血少"）。
+     * 用命数当判据的话，血量制下"还剩 3 条命但只剩 10 血"的玩家会被当成不需要补给。 */
+    if (this.player.hp < this.player.maxHp * 0.6) this.spawnPickup(b.x, b.y + 30, 'H');
   }
 
   /** 普通保险：向前投出一枚高爆弹。
@@ -912,7 +950,7 @@ class Game {
       if (dist2(b.x, b.y, e.x, e.y) > (R + e.r) * (R + e.r)) continue;
       if (e.kind === 'snakeHead') e.hit(PLAYER.bombSnakeDmg, null, this);
       else if (e.kind === 'snakeBody') e.hit(PLAYER.bombSnakeSegDmg, null, this);
-      else e.hit(9999, null, this);
+      else e.hit(9999, null, this, { ignoreShield: true });
     }
     // 3) BOSS：轮廓只要被爆炸圈罩住就吃固定伤害（用与撞机/子弹同一套轮廓判定）
     if (this.bossActive && !this.boss.dead && this._bossHits(this.boss, b.x, b.y, R)) {
@@ -1029,27 +1067,42 @@ class Game {
   }
 
   /** 电弧：从命中点向最近的敌机连跳，伤害逐跳衰减 */
-  chainLightning(x, y, exclude, hops, dmg) {
+  /** 链式电弧：从 (x,y) 起步，逐跳找最近的未命中目标。
+   *  3.36 起接受 opt：`first` 指定第一跳目标、`firstR` / `radius` 两段搜索半径、
+   *  `falloff` / `minDmg` 衰减、`color` / `life` 视觉。
+   *  缺省值就是电弧炮原来的行为（175px、每跳 -0.6、最低 0.8）——
+   *  动缺省值会让 tesla 的手感跟着漂，新武器一律靠 opt 覆盖。 */
+  chainLightning(x, y, exclude, hops, dmg, opt) {
+    const o = opt || {};
+    const radius = o.radius || 175;
+    const firstR = o.firstR || radius;
+    const falloff = o.falloff === undefined ? 0.6 : o.falloff;
+    const minDmg = o.minDmg === undefined ? 0.8 : o.minDmg;
+    const life = o.life || 0.15;
     const chained = exclude ? [exclude] : [];
     let px = x;
     let py = y;
     let power = dmg;
     for (let k = 0; k < hops; k++) {
-      let best = null;
-      let bd = 175 * 175;
-      for (const e of this.enemies) {
-        if (!e.active || chained.indexOf(e) >= 0) continue;
-        if (e.entryImmune || e.spawnGuard > 0) continue;   // 别把跳数浪费在幕布后面的敌机上
-        const d = dist2(px, py, e.x, e.y);
-        if (d < bd) { bd = d; best = e; }
+      let best = (k === 0 && o.first) ? o.first : null;
+      if (best) {
+        chained.push(best);
+      } else {
+        let bd = (k === 0 ? firstR : radius) * (k === 0 ? firstR : radius);
+        for (const e of this.enemies) {
+          if (!e.active || chained.indexOf(e) >= 0) continue;
+          if (e.entryImmune || e.spawnGuard > 0) continue;   // 别把跳数浪费在幕布后面的敌机上
+          const d = dist2(px, py, e.x, e.y);
+          if (d < bd) { bd = d; best = e; }
+        }
+        if (!best) break;
+        chained.push(best);
       }
-      if (!best) break;
-      chained.push(best);
-      this.arcs.push({ x1: px, y1: py, x2: best.x, y2: best.y, life: 0.15, max: 0.15 });
+      this.arcs.push({ x1: px, y1: py, x2: best.x, y2: best.y, life, max: life, c: o.color });
       best.hit(power, null, this);
       px = best.x;
       py = best.y;
-      power = Math.max(0.8, power - 0.6);
+      power = Math.max(minDmg, power - falloff);
     }
   }
 
@@ -1385,7 +1438,9 @@ class Game {
       const k1 = pick(['W', 'W', 'W', 'B', 'B']);
       this.spawnPickup(e.x - 10, e.y, k1,
         k1 === 'W' ? this._rollWeapon() : 0);
-      if (this.player.lives < 3) this.spawnPickup(e.x + 14, e.y, 'H');
+      /* 残血补 H（判据同 BOSS 击破处）：精英是"打得很费劲"的目标，
+       * 掉完东西再给一口血，玩家才敢接着刚下一只。 */
+      if (this.player.hp < this.player.maxHp * 0.6) this.spawnPickup(e.x + 14, e.y, 'H');
       return;
     }
     const roll = Math.random();
@@ -1648,6 +1703,12 @@ class Game {
       return;
     }
 
+    // 最高分在状态机之外统一结算：通关奖励（+2000）是在 clear 状态里加的，
+    // 只在 play/boss 里算的话，通关页显示的 HI 会少掉这一笔
+    this._updateHiScore(dt);
+    // 分数奖励命同理：clear 状态的 +2000 也得算进分数线
+    this._updateScoreLife();
+
     if (this.state === 'intro') {
       this.bannerT -= dt;
       this._updateParticles(dt);
@@ -1684,6 +1745,7 @@ class Game {
         } else {
           this.state = 'win';
           this.winT = 0;      // 刚进通关页：输入锁与提示渐显都从这里起算
+          this._saveHiScore();   // 打完一整局，把纪录立刻落盘
         }
       }
       return;
@@ -1761,7 +1823,7 @@ class Game {
           else if (roll < 0.52) kind = 'B';
           else if (roll < 0.62) kind = 'H';
           else {
-            const pool = ['S', 'T', 'D', 'A'].filter(k => TEMP_FROM[k] <= this.level.id);
+            const pool = ['S', 'T', 'D', 'Z', 'A'].filter(k => TEMP_FROM[k] <= this.level.id);
             kind = pool.length ? pick(pool) : 'B';
           }
           this.spawnPickup(rand(56, VIEW.w - 56), -18, kind,
@@ -1794,7 +1856,8 @@ class Game {
 
       if (this.deathDelayT <= 0) {
         this.deathDelayT = 0;
-        this.onPlayerDead();
+        if (this.respawnPending) this.respawnPlayer();
+        else this.onPlayerDead();
       }
     }
   }
@@ -1964,7 +2027,8 @@ class Game {
       sweep: isMini ? 40 : undefined,
       entry: q.side,
       arc: q.arc,
-      diag: q.diag
+      diag: q.diag,
+      shieldMul: shieldMul(this.level.id)
     });
   }
 
@@ -2769,7 +2833,7 @@ class Game {
       const ey = b.y + Math.sin(b.laserAng) * 1600;
       const d = this._pointSegDist(p.x, p.y, b.x, b.y, ex, ey);
       if (d < b.laserCfg.width * 0.5 + PLAYER.hitR) {
-        p.hit(this);
+        p.hit(this, PLAYER.bulletDmgBig);
         if (!p.alive) return;
       }
     }
@@ -2779,7 +2843,7 @@ class Game {
       const fx = this.boss.fenceX;
       const halfW = 7 + PLAYER.hitR;
       if (Math.abs(p.x - fx) < halfW || Math.abs(p.x - (VIEW.w - fx)) < halfW) {
-        p.hit(this);
+        p.hit(this, PLAYER.bulletDmgBig);
         if (!p.alive) return;
       }
     }
@@ -2848,6 +2912,11 @@ class Game {
         b.active = false;
         p.shield.hp -= 1;
         p.shield.hitT = 0.12;
+        /* 挡弹反馈（3.34）：盾面自己抖（jit，画在 _drawShield 里）+ 一次极轻的震屏。
+         * 震屏只有 4px / 0.1s：护盾在密集弹幕里一秒能挡十几发，给到 10 以上
+         * 就变成持续晃动，反而看不清自己的站位。 */
+        p.shield.jit = TEMP.shield.jit;
+        this.shake(4, 0.1);
         this.addParticle(b.x, b.y, {
           vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 4, color: '#9fe8ff'
         });
@@ -2866,7 +2935,9 @@ class Game {
       if (dist2(b.x, b.y, p.x, p.y) < (PLAYER.hitR + b.r) * (PLAYER.hitR + b.r)) {
         b.active = false;
         if (this.god) continue;
-        p.hit(this);
+        // b.r 是已经乘过 ENEMY_BULLET_HIT_K 的判定半径：视半径 14 的大弹算下来 ≈10，
+        // 所以用 9 当"大弹"门槛，小/中弹（4.3 / 7.2）统一按普通弹算
+        p.hit(this, b.r >= 9 ? PLAYER.bulletDmgBig : PLAYER.bulletDmg);
         if (!p.alive) return;
       }
     }
@@ -2883,20 +2954,26 @@ class Game {
       const ramming = e.def.mb === 'ram' && e.ramState === 2;
       if (e.fromBottom && e.y > 320 && !ramming) continue;
       if (dist2(p.x, p.y, e.x, e.y) < (PLAYER.hitR + e.r * 0.8) * (PLAYER.hitR + e.r * 0.8)) {
-        // 冲角型不因撞机自毁：它是唯一主动撞上来的单位，
-        // 如果撞到就死，"被撞一下顺手换掉一个小 BOSS"会变成最优解
-        // 整条蛇（头 + 关节）都不吃撞机伤害：999 打在头上等于"撞一下剩 1 血"，
-        // 打在关节上则是一条命换一节的分。撞上去只惩罚玩家，蛇本身当墙处理。
-        if (!ramming && e.ai !== 'snake') e.hit(999, null, this);
+        /* 撞机 = 双方都掉血（3.32）。以前敌机吃 999 直接爆，
+         * 现在按"自身最大血量 × ramEnemyDmg"结算：小机当场碎，重装机剩三成，
+         * 小 BOSS 只掉一块——而不是被撞一下就凭空消失。
+         * 冲角型（俯冲中）不因撞机自毁：它是唯一主动撞上来的单位，
+         * 撞到就死会让"被撞一下顺手换掉一个小 BOSS"变成最优解。
+         * 整条蛇（头 + 关节）都不吃撞机伤害，当墙处理（否则一条命换一节的分）。 */
+        if (!ramming && e.ai !== 'snake') {
+          e.hit(Math.max(30, e.maxHp * PLAYER.ramEnemyDmg), null, this, { ignoreShield: true });
+        }
         if (this.god) continue;
-        p.hit(this);
+        p.hit(this, PLAYER.ramDmg);
         if (!p.alive) return;
       }
     }
 
     // BOSS 撞机：用 BOSS_HULL 的多圆轮廓，比单个矩形贴合实体形状
     if (this.bossActive && !this.boss.dead) {
-      if (this._bossHits(this.boss, p.x, p.y, PLAYER.hitR) && !this.god) p.hit(this);
+      if (this._bossHits(this.boss, p.x, p.y, PLAYER.hitR) && !this.god) {
+        p.hit(this, PLAYER.ramDmg);
+      }
     }
 
   }
@@ -2918,8 +2995,12 @@ class Game {
           for (let i = 0; i < p.lv.length; i++) {
             p.lv[i] = Math.min(PLAYER.maxPower, p.lv[i] + 1);
           }
+          /* 顺带回一点血（3.35）：P 掉得最多，满级之后捡到就是纯废道具，
+           * 给一点擦伤回复让它在任何阶段都有收获感。量刻意很小（12），
+           * 回血主力仍是 H（50），两者不会互相顶掉。 */
+          p.hp = Math.min(p.maxHp, p.hp + PLAYER.pHealAmount);
         } else if (k.kind === 'W') {
-          p.addWeapon(k.weapon || 0, this);
+          p.addWeapon(k.weapon || 0, this, k.lv || 0);
         } else if (k.kind === 'B') {
           p.bombs = Math.min(PLAYER.maxBombs, p.bombs + 1);
         } else if (k.kind === 'O') {
@@ -2934,10 +3015,28 @@ class Game {
           p.gainTempWpn(this, 'track');
         } else if (k.kind === 'D') {
           p.gainTempWpn(this, 'wide');
+        } else if (k.kind === 'Z') {
+          p.gainTempWpn(this, 'thunder');
         } else if (k.kind === 'A') {
           p.gainTempAlly(this);
-        } else {
+        } else if (k.kind === 'H') {
+          /* 3.33：H 只回血，不加命。
+           * 以前它是"生命 +1"，而命是这条玩法唯一的失败计数——
+           * 一个击落率 8% 的条目能白送多半条命，等于把"别撞弹"这课划掉。
+           * 回血量走 PLAYER.healAmount（半条），够补一次失误、补不回一整段弹幕。 */
+          p.hp = Math.min(p.maxHp, p.hp + PLAYER.healAmount);
+        } else if (k.kind === 'E') {
+          /* 加命：全表最稀有的一条（一整局平均只掉一件）。
+           * 封顶仍走 PLAYER.maxLives，和分数奖励共用一个上限。 */
+          const before = p.lives;
           p.lives = Math.min(PLAYER.maxLives, p.lives + 1);
+          if (p.lives > before) {
+            this._bigToast('1UP', '加命道具 · 剩余命 ' + p.lives, '#ffe9a8');
+            SFX.extraLife();
+          }
+        } else {
+          // 兜底：不该再有"未知类型 = 加命"这种分支——命太贵，
+          // 新增道具忘了写 case 时要静默无效，而不是白送一条命
         }
         this.score += SCORE.pickup;
         for (let i = 0; i < 10; i++) {
@@ -3136,8 +3235,8 @@ class Game {
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-      ctx.strokeStyle = 'rgba(125,250,255,0.9)';
-      ctx.lineWidth = 3;
+      ctx.strokeStyle = a.c || 'rgba(125,250,255,0.9)';
+      ctx.lineWidth = a.c ? 4 : 3;
       ctx.stroke();
       ctx.strokeStyle = 'rgba(255,255,255,0.95)';
       ctx.lineWidth = 1.2;
@@ -3173,6 +3272,88 @@ class Game {
     }
   }
 
+  /* ------------------------------------------------ 最高分 */
+
+  _loadHiScore() {
+    try {
+      const v = parseInt(localStorage.getItem(HI_KEY), 10);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    } catch (e) {
+      return 0;         // 隐私模式 / 禁用存储：当没有记录处理，不要抛
+    }
+  }
+
+  _saveHiScore() {
+    try {
+      localStorage.setItem(HI_KEY, String(this.hiScore));
+    } catch (e) { /* 写不进去就算了，本局内显示仍然正确 */ }
+  }
+
+  /** 破纪录就实时抬最高分。存档做节流：分数每帧都在涨，
+   *  每帧写一次 localStorage 会拖慢主线程（序列化 + 同步 IO）。 */
+  _updateHiScore(dt) {
+    if (this.score > this.hiScore) {
+      this.hiScore = this.score;
+      if (this.hiBeatT <= 0) this.hiBeatT = 1.4;    // 刚破纪录，HUD 高亮一下
+    }
+    if (this.hiBeatT > 0) this.hiBeatT -= dt;
+    if (this.hiSaveT > 0) {
+      this.hiSaveT -= dt;
+      if (this.hiSaveT <= 0) this._saveHiScore();
+    } else if (this.score > 0 && this.score === this.hiScore) {
+      this.hiSaveT = 1.2;
+    }
+  }
+
+  /** 分数奖励命：过一档就 +1，一帧里跨好几档就一次补齐。
+   *  只在分数上加一个门槛、而不是在玩家每次死亡时补命，
+   *  是因为"再打两万分我就又有一条命"是能主动追的目标，
+   *  "活久了系统赏你"不是。 */
+  _updateScoreLife() {
+    if (this.score < this.nextLifeScore) return;
+    let gained = 0;
+    // 循环而不是 if：清屏炸弹一帧炸掉二十架时分数能跳几千，用 if 会静默吃掉一档
+    while (this.score >= this.nextLifeScore) {
+      this.nextLifeScore += SCORE_1UP.step;
+      gained++;
+    }
+    const p = this.player;
+    const before = p.lives;
+    p.lives = Math.min(PLAYER.maxLives, p.lives + gained);
+    if (p.lives <= before) return;      // 已经封顶：不给提示，免得每档都弹一次空通知
+    this._bigToast('1UP', '分数奖励 · 剩余命 ' + p.lives, '#ffe9a8');
+    this.flashT = Math.max(this.flashT, 0.12);
+    SFX.extraLife();
+  }
+
+  /** 飞机被打爆：把身上的武器 / 僚机 / 环绕机变成慢速下飘的道具。
+   *  武器按"降一档"散落（lv-1，最低 1）：装备不是白丢，但也不该原样奉还，
+   *  否则"打爆一架飞机"就只剩扣命、没有掉火力的痛感。
+   *  横向按序号撒开，全部叠在爆机点会变成一坨读不出是什么的图标。 */
+  dropLoadout(p) {
+    const items = [];
+    for (let i = 0; i < p.weapons.length; i++) {
+      items.push({ kind: 'W', weapon: p.weapons[i], lv: Math.max(1, (p.lv[i] || 1) - 1) });
+    }
+    for (let i = 0; i < p.options.length; i++) items.push({ kind: 'O' });
+    for (let i = 0; i < p.orbits.length; i++) items.push({ kind: 'R' });
+
+    const n = items.length;
+    for (let i = 0; i < n; i++) {
+      const it = items[i];
+      const dx = (i - (n - 1) / 2) * 26;
+      /* 下飘速度 18px/s：从底边（约 y=780）到回收线（y=894）要走 6 秒以上，
+       * 加上 1.5 秒的爆机延迟，玩家重生后还有 5 秒以上的时间回来捡；
+       * 46px/s 那种"散落"在实测里 2 秒就被底边吃掉了，等于装备白丢。
+       * 道具本身有 230px 磁吸，重生点附近的那几件会自动吸过来。 */
+      this.spawnPickup(
+        clamp(p.x + dx, 34, VIEW.w - 34),
+        clamp(p.y + rand(-8, 8), PLAY_TOP + 34, PLAY_BOTTOM - 10),
+        it.kind, it.weapon, { dir: 1, speed: 18, lv: it.lv }
+      );
+    }
+  }
+
   _drawHud(ctx) {
     ctx.save();
 
@@ -3191,6 +3372,12 @@ class Game {
     ctx.fillStyle = '#cfe8ff';
     ctx.textAlign = 'left';
     ctx.fillText(String(this.score).padStart(7, '0'), 18, 20);
+
+    /* 最高分：跟在分数右边、小一档。破纪录的瞬间转暖黄闪 1.4 秒，
+     * 否则"最高分"在局内一直等于当前分，玩家根本看不出自己已经刷新了记录。 */
+    ctx.font = '600 11px ui-monospace, monospace';
+    ctx.fillStyle = this.hiBeatT > 0 ? '#ffe38a' : 'rgba(150,180,205,0.72)';
+    ctx.fillText('HI ' + String(this.hiScore).padStart(7, '0'), 116, 24);
 
     ctx.font = '11px ui-monospace, monospace';
     ctx.fillStyle = 'rgba(140,180,210,0.75)';
@@ -3212,6 +3399,18 @@ class Game {
       ctx.font = '11px ui-monospace, monospace';
       ctx.fillText('×' + this.player.lives, VIEW.w - 24 - shownLives * 26 + 8, 33);
     }
+
+    /* 血量条：贴在生命图标下方。图标是"还能被打爆几次"，血条是"这一架还能挨几下"，
+     * 两条信息必须同时在场——只留图标会让玩家以为挨一发就要掉命。 */
+    const hpW = 84, hpH = 5;
+    const hx = VIEW.w - 18 - hpW, hy = 44;
+    const hpK = clamp(this.player.hp / this.player.maxHp, 0, 1);
+    ctx.fillStyle = 'rgba(6,12,20,0.72)';
+    ctx.fillRect(hx - 1, hy - 1, hpW + 2, hpH + 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(hx, hy, hpW, hpH);
+    ctx.fillStyle = hpK > 0.6 ? '#68e08a' : (hpK > 0.3 ? '#ffd166' : '#ff5a6e');
+    ctx.fillRect(hx, hy, hpW * hpK, hpH);
 
     this._drawWeaponSlots(ctx);
     this._drawTempHud(ctx);
@@ -3541,15 +3740,19 @@ class Game {
     ctx.fillStyle = '#eaf6ff';
     ctx.font = '17px ui-monospace, monospace';
     ctx.fillText('SCORE  ' + this.score, cx, VIEW.h * 0.315 + 36);
+    // 最高分跟在同一行：结算页中间已经被"阵亡于 / BOSS 战阵亡 / 重来提示"占满了
+    ctx.fillStyle = this.score >= this.hiScore && this.score > 0 ? '#ffe38a' : 'rgba(150,180,205,0.72)';
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.fillText('HI  ' + this.hiScore, cx, VIEW.h * 0.315 + 56);
 
     ctx.fillStyle = 'rgba(130,172,205,0.62)';
     ctx.font = '10px ui-monospace, monospace';
-    ctx.fillText('阵亡于  ' + this.level.sub, cx, VIEW.h * 0.315 + 58);
+    ctx.fillText('阵亡于  ' + this.level.sub, cx, VIEW.h * 0.315 + 76);
 
     if (this.deathBoss) {
       ctx.fillStyle = 'rgba(255,180,120,0.82)';
       ctx.font = '11px "PingFang SC", sans-serif';
-      ctx.fillText('BOSS 战阵亡 · 续关保留 BOSS 血量', cx, VIEW.h * 0.315 + 80);
+      ctx.fillText('BOSS 战阵亡 · 续关保留 BOSS 血量', cx, VIEW.h * 0.315 + 96);
     }
 
     if (canCont) {
@@ -4038,6 +4241,9 @@ class Game {
       ctx.fillStyle = '#eaf6ff';
       ctx.font = '18px ui-monospace, monospace';
       ctx.fillText('SCORE  ' + this.score, cx, VIEW.h * 0.38 + 44);
+      ctx.fillStyle = this.score >= this.hiScore && this.score > 0 ? '#ffe38a' : 'rgba(160,190,215,0.78)';
+      ctx.font = '13px ui-monospace, monospace';
+      ctx.fillText('HI  ' + this.hiScore, cx, VIEW.h * 0.38 + 68);
       // 通关页前 2 秒锁输入：提示文字同步换成"请稍候"，否则玩家会以为点击失效
       if (this.winT >= WIN_INPUT_LOCK) {
         const a = Math.min(1, (this.winT - WIN_INPUT_LOCK) / 0.4);
@@ -4314,6 +4520,12 @@ class Game {
     ctx.stroke();
 
     const blink = Math.floor(t * 1.6) % 2 === 0;
+    // 最高分放在"出击"提示上方：这是玩家按下去之前唯一会看的一行
+    if (this.hiScore > 0) {
+      ctx.fillStyle = 'rgba(255,225,150,0.82)';
+      ctx.font = '600 13px ui-monospace, monospace';
+      ctx.fillText('HI  ' + this.hiScore, cx, VIEW.h * 0.497);
+    }
     if (blink) {
       ctx.fillStyle = '#ffffff';
       ctx.font = '600 16px "PingFang SC", sans-serif';
@@ -4330,15 +4542,17 @@ class Game {
 
     /* ---------- 道具说明 ---------- */
     const items = [
-      { k: 'P', label: '全武器 +1 级', color: '#66e0ff' },
+      { k: 'P', label: '武器 +1', color: '#66e0ff' },
       { k: 'W', label: '换武器', color: '#ffc857' },
       { k: 'O', label: '僚机 +1', color: '#a8f4ff' },
       { k: 'R', label: '环绕机+1', color: '#ff8ce0' },
       { k: 'L', label: '激光雷+1', color: '#b48cff' },
       { k: 'B', label: '保险 +1', color: '#7dff9e' },
-      { k: 'H', label: '生命 +1', color: '#ff7a8a' }
+      { k: 'H', label: '回血 50', color: '#ff7a8a' },
+      { k: 'E', label: '加命', color: '#fff2b0' }
     ];
-    const gap = 62;
+    // 8 个条目按 62 的间距会顶到屏幕两侧（480 宽），压到 54
+    const gap = items.length > 7 ? 54 : 62;
     const y0 = VIEW.h * 0.712;
 
     ctx.font = '10px "PingFang SC", sans-serif';
@@ -4370,11 +4584,12 @@ class Game {
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // 字母
+      // 字母（E 的显示文本是 1UP，3 个字符要塞进半径 15 的圆，字号得缩）
+      const lg = it.k === 'E' ? '1UP' : it.k;
       ctx.fillStyle = it.color;
-      ctx.font = 'bold 15px ui-monospace, monospace';
+      ctx.font = 'bold ' + (lg.length > 1 ? 10 : 15) + 'px ui-monospace, monospace';
       ctx.textBaseline = 'middle';
-      ctx.fillText(it.k, x, y0 + 1);
+      ctx.fillText(lg, x, y0 + 1);
       ctx.textBaseline = 'alphabetic';
 
       // 标签
@@ -4388,7 +4603,7 @@ class Game {
     ctx.fillStyle = 'rgba(255,210,120,0.72)';
     ctx.fillText('W：不同武器各占一槽（最多 ' + WEAPON_SLOTS + ' 个），同时开火', cx, y0 + 62);
     ctx.fillStyle = 'rgba(255,180,140,0.66)';
-    ctx.fillText('W：同款再吃 → 那把枪 +1 级（满级转全弹发射）', cx, y0 + 78);
+    ctx.fillText('W：新枪从 L1 起 · 同款再吃 → 那把枪 +1 级（满级转全弹）', cx, y0 + 78);
     ctx.fillStyle = 'rgba(160,240,255,0.72)';
     ctx.fillText('O：僚机最多 2 架；满员后再吃 → 短暂无敌', cx, y0 + 94);
     ctx.fillStyle = 'rgba(255,140,220,0.75)';
@@ -4397,9 +4612,12 @@ class Game {
     ctx.fillText('L：激光保险 · X 清屏炸弹 / C 或 L 放激光', cx, y0 + 126);
     // 临时增益用菱形，和上面圆形的永久道具在视觉上分开
     ctx.fillStyle = 'rgba(159,232,255,0.72)';
-    ctx.fillText('◇ S 护盾 / T 追踪弹 / D 宽头弹 / A 僚机：临时增益，到期消失', cx, y0 + 142);
+    ctx.fillText('◇ 临时增益 S 护盾 / T 追踪 / D 宽头 / Z 雷电 / A 僚机（到期消失）', cx, y0 + 142);
     ctx.fillStyle = 'rgba(255,120,140,0.7)';
-    ctx.fillText('P：全部已装武器各 +1 级 · 中弹：全部武器各 -1 级', cx, y0 + 158);
+    ctx.fillText('P：全部已装武器各 +1 级，顺带回血 ' + PLAYER.pHealAmount + ' · 打爆才散落装备', cx, y0 + 158);
+    ctx.fillStyle = 'rgba(255,232,170,0.72)';
+    ctx.fillText('H 只回血 · 加分得命：' + (SCORE_1UP.first / 10000) + ' 万分起，之后每 ' +
+      (SCORE_1UP.step / 10000) + ' 万分 +1 条', cx, y0 + 174);
 
     ctx.fillStyle = 'rgba(110,150,180,0.45)';
     ctx.font = '9px ui-monospace, monospace';

@@ -97,6 +97,15 @@ const SFX = {
     this._noise(0.06, 0.18, 2600, 2);
   },
 
+  /** 雷电落雷：高频"啪" + 极短噪声。
+   *  和电弧炮的连续射击（shoot）必须一耳朵分开——它 0.42s 才响一次，
+   *  听起来应该像"一道雷劈下来"，而不是又一颗子弹。 */
+  thunder() {
+    if (!this._gate('thunder', 60)) return;
+    this._tone(1700, 0.06, 'square', 0.10, 480);
+    this._noise(0.12, 0.20, 4200, 2.2);
+  },
+
   explode(big) {
     if (!this._gate(big ? 'expb' : 'exp', big ? 90 : 55)) return;
     this._noise(big ? 0.5 : 0.24, big ? 0.55 : 0.28, big ? 900 : 1500, 0.8);
@@ -178,12 +187,28 @@ const SFX = {
     this._tone(1320, 0.26, 'triangle', 0.09, 1760, 0.20);
   },
 
+  /** 加命：必须一耳朵就和"捡道具"分开——它是这一局最稀有的奖励 */
+  extraLife() {
+    const notes = [784, 1046, 1318];
+    notes.forEach((f, i) => this._tone(f, 0.14, 'square', 0.12, f * 1.01, i * 0.08));
+    this._tone(1568, 0.36, 'triangle', 0.11, 2093, 0.26);
+  },
+
   continueRun() {
     // 上行琶音：和失败音效反向，听觉上立刻区分“又活了”
     const notes = [392, 523, 659, 880];
     notes.forEach((f, i) => this._tone(f, 0.16, 'square', 0.13, f * 1.02, i * 0.07));
     this._tone(1046, 0.34, 'triangle', 0.12, 1318, 0.30);
     this._noise(0.3, 0.18, 2400, 1.6);
+  },
+
+  /** 破盾：高频短噪声 + 快速下滑，听感是"玻璃碎了"而不是"又炸了一架"。
+   *  护盾期子弹打上去没有爆炸声，破盾这一下必须是整段里唯一的高频尖声，
+   *  玩家才能靠听辨出"这层没了，接下来才是真伤"。 */
+  shieldBreak() {
+    if (!this._gate('shbreak', 70)) return;
+    this._noise(0.16, 0.24, 5200, 3);
+    this._tone(1320, 0.16, 'triangle', 0.10, 620);
   },
 
   gameOver() {
