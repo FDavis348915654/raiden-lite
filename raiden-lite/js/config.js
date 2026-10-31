@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.49.0';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.53.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -703,8 +703,13 @@ const HI_KEY = 'raiden-lite.hi.v1';
  */
 const ENEMY_DEFS = {
   scout:     { sprite: 'e_scout',     hp: 5,   speed: 120, score: 110, r: 0.60, ai: 'straight' },
-  fighter:   { sprite: 'e_fighter',   hp: 11,  speed: 95,  score: 190, r: 0.64, ai: 'shooter',  fire: 2.1 },
-  bomber:    { sprite: 'e_bomber',    hp: 52,  speed: 62,  score: 420, r: 0.70, ai: 'bomber',   fire: 2.9 },
+  /* nonAim（3.53）：**只朝机头前方打，不读玩家位置**。
+   * 给"成排压过来"的杂兵用。它们本来就是一道推进的墙，每发都拐向玩家的话，
+   * 满屏子弹会拧成同一股流向——玩家横移一次就全躲开，也看不出谁在瞄他。
+   * 追着打的留给 looper（爬升追击）/ riser（底部升起）/ sniper（狙击）/ 小 BOSS。
+   * 判据：这机型的编排是不是"整排/整队压下来"，是就直射。 */
+  fighter:   { sprite: 'e_fighter',   hp: 11,  speed: 95,  score: 190, r: 0.64, ai: 'shooter',  fire: 2.1, nonAim: true },
+  bomber:    { sprite: 'e_bomber',    hp: 52,  speed: 62,  score: 420, r: 0.70, ai: 'bomber',   fire: 2.9, nonAim: true },
   diver:     { sprite: 'e_diver',     hp: 14,  speed: 75,  score: 210, r: 0.60, ai: 'diver' },
   mine:      { sprite: 'e_mine',      hp: 12,  speed: 42,  score: 180, r: 0.68, ai: 'drift',  deathBurst: 12 },
   formation: { sprite: 'e_formation', hp: 10,  speed: 105, score: 180, r: 0.64, ai: 'straight' },
@@ -715,9 +720,9 @@ const ENEMY_DEFS = {
   drone:     { sprite: 'e_drone',     hp: 7,  speed: 135, score: 140, r: 0.58, ai: 'chase' },
   shield:    { sprite: 'e_shield',    hp: 38,  speed: 55,  score: 600, r: 0.68, ai: 'tank' },
   kamikaze:  { sprite: 'e_kamikaze',  hp: 8,  speed: 145, score: 260, r: 0.56, ai: 'kamikaze' },
-  flame:     { sprite: 'e_flame',     hp: 14,  speed: 88,  score: 340, r: 0.62, ai: 'shooter',  fire: 1.7 },
+  flame:     { sprite: 'e_flame',     hp: 14,  speed: 88,  score: 340, r: 0.62, ai: 'shooter',  fire: 1.7, nonAim: true },
   mirror:    { sprite: 'e_mirror',    hp: 16,  speed: 92,  score: 400, r: 0.64, ai: 'mirror' },
-  heavy:     { sprite: 'e_heavy',     hp: 155, speed: 42,  score: 900, r: 0.76, ai: 'heavy',    fire: 2.5 },
+  heavy:     { sprite: 'e_heavy',     hp: 155, speed: 42,  score: 900, r: 0.76, ai: 'heavy',    fire: 2.5, nonAim: true },
 
   /* --- 进阶单位 --- */
   // 高级浮雷：同一贴图放大，血厚、爆散更多子弹
@@ -996,7 +1001,10 @@ const LEVELS = [
     boss: 'boss3',
     bossName: '深渊之眼',
     support: 'eel',
-    bossHp: 3500,
+    /* 3.53：外层护盾从"28% 减伤"改成"真挡住子弹"后，有效输出掉了一半，
+     * 血量按等效值下调（3500 → 2400），实测三槽满级站桩击杀 76s → 61s，
+     * 和第 4 关（4200 血 / 62s）同量级。 */
+    bossHp: 2400,
     hint: '高速鱼雷 · 电鳗摆尾',
     // 深海要塞：洋流慢，补给从深处浮上来；落到要塞底部会反弹
     supply: [
@@ -1078,6 +1086,15 @@ const LEVELS = [
     bossHp: 5600,
     bossRate: 0.97,
     hint: '喷火机 · 镜像机 · 悬停水母',
+    /* 压制开火（3.52）：本关的喷火机是"压制单位"——三波从顶部成排压下、两波从侧翼贴边切入，
+     * 允许它在贴着画面上沿时就出手，弹会先一步压到底部，玩家一侧的横向空间被封掉，
+     * 只能往另一边走，这是这一关的走位考题。
+     * 实际生效的是顶部那一批：侧向入场是 235px/s 斜切，0.2 秒就整只进屏，
+     * 探入四成的窗口太短，压制档来不及落在那批身上。
+     * 白名单以外的一切机型、以及其余关卡，仍然要整只入场才允许开火：
+     * 这套打法一旦变成全场默认，每关顶部都挂着一层提前布好的弹，
+     * "看机身位置判断威胁"就不再是玩家要学的东西了。 */
+    edgeFire: ['flame'],
     // 熔核母舰：反应堆热流全往上走，补给全从底部升上来；顶上碰壁再落回来一份激光保险
     supply: [
       { at: 5,  kind: 'P', from: 'rise' },
@@ -1260,6 +1277,11 @@ const LEVELS = [
     bossHp: 10400,
     bossRate: 0.84,
     hint: '全机型混编 · 双蛇',
+    /* 终局关只给 heavy 开压制：它的 pincer 段从顶部两翼压下来，正是"提前布弹"最合适的位置。
+     * 不给 sniper 是因为侧向入场（side）是 235px/s 斜切进来，0.2 秒就整只进屏，
+     * 压制档（探入四成才放行）在它身上根本来不及生效——写进白名单只是噪音。
+     * 这一档是第 5 关那套打法的回收，不做通用规则。 */
+    edgeFire: ['heavy'],
     // 终焉星环：星环上下两半同时投放，同一时刻一份自上落下、一份自下升起
     supply: [
       { at: 7,  kind: 'P', from: 'top',  x: 0.28 },

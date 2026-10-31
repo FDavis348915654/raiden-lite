@@ -445,9 +445,11 @@ class Game {
       }
       if (k === 'escape' || k === 'p') this.togglePause();
       // 两种保险：必须过滤 e.repeat，否则按住 X 会以系统重复率连放（0.7 秒后 30 次/秒）
+      // Z / X 是相邻的一对（3.50 从 C/V/L 改过来）：两颗保险各占左手一个键，
+      // 不用低头找字母；旧的 C/V/L/B 一并撤掉，留着反而让人以为打错了键
       if (!e.repeat) {
-        if (k === 'x' || k === 'b') this._pressBomb();
-        if (k === 'c' || k === 'v' || k === 'l') this._pressLaser();
+        if (k === 'x') this._pressBomb();
+        if (k === 'z') this._pressLaser();
         // 切主武器：Q 循环下一把；数字键 1~N 直接选中第 N 格（N = WEAPON_SLOTS）
         // 用数值比较而不是字符串比较，槽数涨到两位数也不会判断错
         if (k === 'q') this._pressSwitch();
@@ -1011,8 +1013,11 @@ class Game {
           this.onDroneDestroyed(bo, d, px, py);
         }
       }
-      // 本体放在部件之后：hit() 可能直接把 BOSS 打死并触发结算流程
-      if (!bo.dead && this._bossHits(bo, b.x, b.y, R)) bo.hit(PLAYER.bombBossDmg, this);
+      // 本体放在部件之后：hit() 可能直接把 BOSS 打死并触发结算流程。
+      // raw：保险是反制手段，不该被轮转护盾吃掉（挡弹只针对普通子弹）。
+      if (!bo.dead && this._bossHits(bo, b.x, b.y, R)) {
+        bo.hit(PLAYER.bombBossDmg, this, { raw: true });
+      }
     }
     this._bombing = false;
 
@@ -1184,19 +1189,23 @@ class Game {
     if (!count) SFX.hit();
   }
 
-  /** 敌机死亡时向四周散射子弹（浮雷专用） */
+  /** 敌机死亡时向四周散射子弹（浮雷专用）。
+   *  爆散点必须夹进可活动区（3.51）：浮雷贴边被炸掉时 e.x 可以是 -11，
+   *  那一圈弹会从屏幕外射进来，玩家只看到"凭空多出一片弹幕"。 */
   deathBurst(e) {
     const n = e.def.deathBurst;
+    const bx = clamp(e.x, 16, VIEW.w - 16);
+    const by = clamp(e.y, PLAY_TOP + 16, VIEW.h - 16);
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + rand(-0.06, 0.06);
       const sp = 138 + rand(-16, 26);
-      this.spawnEnemyBullet(e.x, e.y, Math.cos(a) * sp, Math.sin(a) * sp, {
+      this.spawnEnemyBullet(bx, by, Math.cos(a) * sp, Math.sin(a) * sp, {
         kind: 'enemyAlt',
         r: 7,
         life: 5
       });
     }
-    this.addParticle(e.x, e.y, { life: 0.32, r: 44, color: '#c9a6ff', drag: 1 });
+    this.addParticle(bx, by, { life: 0.32, r: 44, color: '#c9a6ff', drag: 1 });
     SFX.enemyShoot();
   }
 
@@ -2917,6 +2926,18 @@ class Game {
         // （旧代码这里是 w×0.40 / h×0.36 的矩形，比玩家撞机的框还大）。
         // 给子弹留 2px 余量：轮廓是内切圆近似的，边缘小部件容易被漏掉。
         if (this._bossHits(bo, b.x, b.y, b.r + 2, false)) {
+          /* 轮转护盾（3.53）：缺口之外把子弹挡在盾面上——消耗子弹、跳冷色火花、
+           * 护盾弧闪一下，但不结算伤害。位置放在轮廓命中之后、hit() 之前：
+           * 这样"打盾"与"打本体"是两条路，前者不触发受击白闪，血条也不动。 */
+          if (bo.shieldBlocks(b.x, b.y)) {
+            b.active = false;
+            bo.shieldFlash = 0.22;
+            this.addParticle(b.x, b.y, {
+              vx: rand(-70, 70), vy: rand(-90, 10), life: 0.22, r: 3, color: '#9fe8ff'
+            });
+            SFX.hit();
+            continue;
+          }
           // 穿透弹在 BOSS 体内会停留多帧，用 0.14s 的间隔限制重复结算
           if (b.pierce) {
             if (b.bossT > 0) continue;
@@ -3808,7 +3829,7 @@ class Game {
     ctx.font = '700 17px ui-monospace, monospace';
     ctx.fillText(String(n), x, y - 3);
     ctx.font = '7px ui-monospace, monospace';
-    ctx.fillText('C·LASER', x, y + 10);
+    ctx.fillText('Z·LASER', x, y + 10);
     ctx.restore();
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
@@ -4772,7 +4793,9 @@ class Game {
     ctx.fillStyle = 'rgba(255,140,220,0.75)';
     ctx.fillText('R：环绕机最多 2 台；能挡子弹、撞敌机', cx, y0 + 110);
     ctx.fillStyle = 'rgba(180,140,255,0.8)';
-    ctx.fillText('L：激光保险 · X 清屏炸弹 / C 或 L 放激光', cx, y0 + 126);
+    /* 这一行说的是**键盘**，下一行的 S/T/D/Z/A 是拾取代号——两者都出现字母，
+     * 所以这里显式写"键盘"，让玩家分得清哪个是按键、哪个是道具名。 */
+    ctx.fillText('L：激光保险道具 · 键盘 Z 激光 / X 清屏炸弹（右下角两钮）', cx, y0 + 126);
     // 临时增益用菱形，和上面圆形的永久道具在视觉上分开
     ctx.fillStyle = 'rgba(159,232,255,0.72)';
     ctx.fillText('◇ 临时增益 S 护盾 / T 追踪 / D 宽头 / Z 雷电 / A 僚机（到期消失）', cx, y0 + 142);

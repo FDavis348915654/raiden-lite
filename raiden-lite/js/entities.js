@@ -1719,6 +1719,9 @@ class Enemy {
     this.vy = 0;
     this.flash = 0;
     this.rot = 0;
+    /* 直射型（def.nonAim）的"前方"就是机头方向：只有从底部升起的单位朝上，
+     * looper 掉头后由 _update 置 true。不要用 rot 反推——侧向入场时 rot 是斜的。 */
+    this.faceUp = def.ai === 'riser';
     this.hoverT = 0;
     this.arriveT = 0;
     this.entry = opt.entry || null;   // 'left' / 'right'：从屏幕侧面斜切进入
@@ -1892,7 +1895,7 @@ class Enemy {
         this.y += this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 1.1 + this.phase) * 14;
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y > PLAY_TOP && this.y < VIEW.h * 0.75) {
+        if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.75) {
           this.fireT = this.def.fire;
           this.shoot(game, 'aim');
         }
@@ -1904,7 +1907,7 @@ class Enemy {
         this.y += this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 0.7 + this.phase) * 10;
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y > PLAY_TOP + 24 && this.y < VIEW.h * 0.70) {
+        if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.70) {
           this.fireT = this.def.fire;
           this.shoot(game, 'snipe');
         }
@@ -1914,7 +1917,7 @@ class Enemy {
         this.y += this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 0.8 + this.phase) * 26;
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y > PLAY_TOP && this.y < VIEW.h * 0.7) {
+        if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.7) {
           this.fireT = this.def.fire;
           this.shoot(game, 'fan3');
         }
@@ -1957,7 +1960,7 @@ class Enemy {
           this.y += this.speed * dt;
         }
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y > PLAY_TOP && this.hoverT < 10) {
+        if (this.fireT <= 0 && this.inPlay(game) && this.hoverT < 10) {
           this.fireT = this.def.fire;
           this.shoot(game, 'ring');
         }
@@ -2042,7 +2045,7 @@ class Enemy {
         this.y += this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 0.5 + this.phase) * 22;
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y > PLAY_TOP && this.y < VIEW.h * 0.8) {
+        if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.8) {
           this.fireT = this.def.fire;
           this.shoot(game, 'aim2');
         }
@@ -2055,12 +2058,13 @@ class Enemy {
           if (this.y > VIEW.h * 0.70) {
             this.turned = true;
             this.rot = Math.PI;             // 机头转向上
+            this.faceUp = true;             // 直射型的"前方"跟着翻面（见 shoot）
           }
         } else {
           this.y -= this.speed * 1.08 * dt;
           this.x += clamp(p.x - this.x, -150 * dt, 150 * dt) * 1.3;
           this.fireT -= dt;
-          if (this.fireT <= 0 && this.y > 90) {
+          if (this.fireT <= 0 && this.inPlay(game)) {
             this.fireT = this.def.fire;
             this.shoot(game, 'aim');
           }
@@ -2073,7 +2077,7 @@ class Enemy {
         this.y -= this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 1.5 + this.phase) * 26;
         this.fireT -= dt;
-        if (this.fireT <= 0 && this.y < VIEW.h - 70) {
+        if (this.fireT <= 0 && this.inPlay(game)) {
           this.fireT = this.def.fire;
           this.shoot(game, 'aim');
         }
@@ -2112,7 +2116,7 @@ class Enemy {
           this.y = 216 + Math.sin(mt * 1.3) * 8;
           this.x = this.centerX + Math.sin(mt * 0.62) * this.sweep;
           this.fireT -= dt;
-          if (this.fireT <= 0 && p.alive) {
+          if (this.fireT <= 0 && this.inPlay(game) && p.alive) {
             this.fireT = this.def.fire;
             this._mbFire(game);
           }
@@ -2135,7 +2139,18 @@ class Enemy {
   shoot(game, mode) {
     const p = game.player;
     if (!p || !p.alive) return;
-    const ang = Math.atan2(p.y - this.y, p.x - this.x);
+    /* 唯一的出手闸门（3.51）：所有开火路径都从这里出去，所以把"整只进画面"
+     * 卡在这里，比在每个 AI 分支各写一份 `y > PLAY_TOP` 可靠——
+     * 之前就是各写各的，新增机型时随手抄一个最松的门槛，弹幕又从 HUD 后面冒出来。 */
+    if (!this.inPlay(game)) return;
+    /* 直射型（3.53，`ENEMY_DEFS[].nonAim`）：不读玩家位置，只朝机头前方打。
+     * 成排压过来的杂兵本来就该铺一堵墙；每发都拐向玩家的话，满屏子弹会拧成
+     * 同一股流向，玩家横移一次就全躲开，也读不出"谁在瞄我"。
+     * 追着打的留给 looper / riser / sniper / 小 BOSS —— 它们的定位就是"盯着你"。
+     * 注意 snipe 不吃这个覆盖（狙击机没有配 nonAim，配了也会变成朝前打慢弹）。 */
+    const ang = this.def.nonAim
+      ? (this.faceUp ? -Math.PI / 2 : Math.PI / 2)
+      : Math.atan2(p.y - this.y, p.x - this.x);
     const bx = this.x, by = this.y + this.h * 0.22;
     if (mode === 'aim') {
       game.spawnEnemyBullet(bx, by, Math.cos(ang) * 235, Math.sin(ang) * 235);
@@ -2253,12 +2268,16 @@ class Enemy {
     }
     this.entryT += dt;
     const s = this.scale;
-    const hw = this.w * s * 0.42;
     const hh = this.h * s * 0.42;
-    /* 判"已入场"的阈值取"贴图开始露头"（下沿越过屏幕顶 +8px），不是"整只进来"：
-     * 整只进来要等半秒多，慢机在密度高的关卡会多积压一批。
-     * 玩家看到的那一下就已经能打，才符合"露头即可打、没露头打不到"的直觉。 */
-    const inside = this.x - hw > 6 && this.x + hw < VIEW.w - 6 &&
+    /* 判"已入场"的阈值取"贴图露出四成"，不是"整只进来"：
+     * 顶部入场的单位在 y+hh>8 时横向本来就整只在屏内，所以下面这条只改到侧向入场的编队——
+     * 它们原来要"整只横着进屏"才结束保护，那段贴边切入的时间里既打不动、
+     * 又恰好是压制档允许开火的窗口（见 inPlay），就成了"打不到的敌机在铺弹幕"。
+     * 用同一把尺子（露出 40%）把"打得到"和"能出手"对齐。
+     * 仍保留 y 上的一条：从底部升起的单位在下沿进屏前不该被白打。 */
+    const hwF = this.w * s * 0.5;
+    const visW = Math.min(this.x + hwF, VIEW.w) - Math.max(this.x - hwF, 0);
+    const inside = visW >= this.w * s * 0.40 &&
       this.y + hh > 8 && this.y + hh < VIEW.h + 40;
     if (inside || this.entryT >= ENTRY_GUARD.max) {
       this.entryDone = true;
@@ -2270,6 +2289,41 @@ class Enemy {
   /** 入场保护期内免疫且不消耗子弹（子弹直接穿过，见 game._updateBullets） */
   get entryImmune() {
     return !this.entryDone || this.entryBuf > 0;
+  }
+
+  /** **出手资格**：默认要求整只（含贴图）都在可活动区里，才允许开火。
+   *
+   *  这条规则的来源：以前每个 AI 各写各的门槛，最松的一档是 `y > PLAY_TOP`——
+   *  那只要求**圆心**越过 HUD 下沿，贴图上半截还压在血条后面。实测第 5 关的火焰机
+   *  有 47/124 发、第 8 关有 43/83 发是在这种"半个身子还在 HUD 里"的状态下打出来的：
+   *  玩家看到的就是"从我打不到的屏幕外射来一片弹幕"。
+   *
+   *  但"边缘铺弹幕墙"本身是有价值的关卡语言——它能把玩家往一侧挤，
+   *  所以 3.52 起分两档，而不是一刀切：
+   *    · 严格档（默认）：整只在可活动区内。
+   *    · 压制档：`LEVELS[].edgeFire` 点名的机型，贴图探入可活动区达四成即可出手。
+   *  压制档仍然守"看得见才打"：探入四成意味着枪口已经在视野里，
+   *  弹不会从 HUD 后面凭空冒出来——这和原来的问题是两件事。
+   *  白名单按关卡写，是因为这套打法只在"侧向压边"编排的关卡里成立；
+   *  变成全场默认的话，每关顶部都挂着一层提前布好的弹，反而读不出谁在威胁你。 */
+  inPlay(game) {
+    const hw = this.w * this.scale * 0.5;
+    const hh = this.h * this.scale * 0.5;
+    if (this.x - hw >= 0 && this.x + hw <= VIEW.w &&
+      this.y - hh >= PLAY_TOP && this.y + hh <= VIEW.h) return true;
+    const lv = game && game.level;
+    if (!lv || !lv.edgeFire || lv.edgeFire.indexOf(this.kind) < 0) return false;
+    /* 打得到才允许出手：入场保护还没结束时不进这一档。
+     * 否则又退回成"打不动的敌机在朝你铺弹幕"，那是 3.51 要解决的原问题。
+     * 两边的判据都是"露出四成"，所以正常情况下这条只是兜底、不会真的卡住它。 */
+    if (this.entryImmune) return false;
+    /* 用"贴图与可活动区的重叠面积"而不是分别判上下左右：
+     * 顶部入场看纵向探入、侧向入场看横向探入，同一段代码都对；
+     * 对角切入（ltr/rtl）两个方向同时压着，面积比会自然更严格，不用另写一套。 */
+    const x0 = Math.max(this.x - hw, 0), x1 = Math.min(this.x + hw, VIEW.w);
+    const y0 = Math.max(this.y - hh, PLAY_TOP), y1 = Math.min(this.y + hh, VIEW.h);
+    if (x1 <= x0 || y1 <= y0) return false;
+    return (x1 - x0) * (y1 - y0) >= 4 * hw * hh * 0.40;
   }
 
   /** 卸下护盾。broken=true 是被打穿（给爆闪 + 碎裂音 + 轻震屏），
@@ -2655,6 +2709,9 @@ class Boss {
     this.shieldPhase = 1;        // 0 右 / 1 下 / 2 左 / 3 上
     this.shieldT = 0;
     this.shieldFlash = 0;
+    /* 每格停留时长。3.53 起可配（盾面改成真挡之后，2.4 秒比子弹飞行时间还短，
+     * 玩家"看到缺口开火"时子弹到时缺口已经转走了，只能靠猜）。 */
+    this.shieldTurn = tr.shieldTurn || 2.4;
 
     // 浮游炮：数量与血量都由 BOSS_TRAITS 给，血量按最大血量分摊
     const dr = tr.drones;
@@ -2946,11 +3003,11 @@ class Boss {
   _updateGimmicks(dt, game) {
     const p = game.player;
 
-    // 护盾轮转：每 2.4 秒转一格
+    // 护盾轮转：每 shieldTurn 秒转一格
     if (this.shieldCfg) {
       this.shieldT += dt;
-      if (this.shieldT >= 2.4) {
-        this.shieldT -= 2.4;
+      if (this.shieldT >= this.shieldTurn) {
+        this.shieldT -= this.shieldTurn;
         this.shieldPhase = (this.shieldPhase + 1) % 4;
       }
       if (this.shieldFlash > 0) this.shieldFlash -= dt;
@@ -2966,8 +3023,9 @@ class Boss {
       d.fireT -= dt;
       if (d.fireT <= 0 && p.alive) {
         d.fireT = 2.4;
+        // x/y 都要夹进画面：只夹 x 的话，BOSS 贴顶巡游时浮游炮会从 HUD 上方开火
         const px = clamp(this.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
-        const py = this.y + Math.sin(d.ang) * d.r;
+        const py = clamp(this.y + Math.sin(d.ang) * d.r, PLAY_TOP + 12, VIEW.h - 12);
         const a = Math.atan2(p.y - py, p.x - px);
         game.spawnEnemyBullet(px, py, Math.cos(a) * 235, Math.sin(a) * 235,
           { kind: 'big', r: 12 });
@@ -3250,23 +3308,32 @@ class Boss {
     return n;
   }
 
-  /* opt.raw（3.49）：跳过护盾轮转的减伤，给"拆炮台连带掉血"用。
-   * 那不是一次"打到本体"的攻击，而是炮塔炸开把舰体撕了一道口子。
-   * 眼下带部件的 BOSS（boss6 / boss7）都还没有轮转盾（只有 boss3 有），
-   * 所以这个 flag 目前是空跑——但以后谁给它们加上 shield，拆炮台就会
-   * 静默变成只掉 28%，一个参数、没有任何报错。规则先写清楚。 */
+  /** 轮转护盾（boss3）：这一点所在的方向是否被盾面盖住（true = 挡住，不结算伤害）。
+   *
+   *  只判角度、不判距离：调用方都已经确认"打在 BOSS 身上"。
+   *  hit() 兜底时传的是**玩家坐标**（玩家永远在盾外），带距离判定会把这一路误判成没挡；
+   *  子弹命中那一处则由 game 传命中点，两者用同一个象限口径，不会互相矛盾。 */
+  shieldBlocks(x, y) {
+    if (!this.shieldCfg) return false;
+    let quad = Math.round(Math.atan2(y - this.y, x - this.x) / (Math.PI / 2));
+    quad = ((quad % 4) + 4) % 4;
+    return quad !== this.shieldPhase && quad !== (this.shieldPhase + 1) % 4;
+  }
+
+  /* opt.raw（3.49）：跳过护盾轮转，给"拆炮台连带掉血"和保险用。
+   * 那不是一次"打到本体"的攻击，而是炮塔炸开把舰体撕了一道口子 / 一颗清屏雷；
+   * 保险尤其不能被盾吃掉，它是玩家拿来破局的唯一手段。
+   *
+   * 3.53：盾面改成**完全挡住**（原来是 28% 减伤）。28% 的版本里"等缺口转过来"
+   * 只是"多打三倍效率"，玩家没有理由等，一直顶着盾打就行——轮转机制等于不存在。
+   * 现在盾面期血量条一动不动，玩家必须把输出压在缺口那半圈上。 */
   hit(dmg, game, opt) {
     if (this.dead) return;
 
-    // 护盾轮转：只有弱点那半圈能打满伤害，其余方向大幅减免
-    if (!(opt && opt.raw) && this.shieldCfg && game && game.player) {
-      const a = Math.atan2(game.player.y - this.y, game.player.x - this.x);
-      let quad = Math.round(a / (Math.PI / 2));
-      quad = ((quad % 4) + 4) % 4;
-      if (quad !== this.shieldPhase && quad !== (this.shieldPhase + 1) % 4) {
-        dmg *= 0.28;
-        this.shieldFlash = 0.18;
-      }
+    if (!(opt && opt.raw) && game && game.player &&
+      this.shieldBlocks(game.player.x, game.player.y)) {
+      this.shieldFlash = 0.22;
+      return;
     }
 
     this.hp -= dmg;
