@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.38.0';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.42.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -145,7 +145,24 @@ const PLAYER = {
   bombVy: -680,             // 出膛初速（向上）
   bombAy: 700,              // 下坠加速度：让轨迹像抛物线，在顶点附近引爆
   bombRadius: 210,          // 爆炸半径（屏幕宽 480，横向约覆盖 88%）
-  bombBossDmg: 160,         // BOSS 轮廓被罩住时的固定伤害
+  /* 对小怪的爆炸伤害（3.39）。以前是硬编码 9999 + ignoreShield，等于
+   * "全屏圈内一律秒杀，护盾形同虚设"——3.37 刚给中型机和小 BOSS 加了盾，
+   * 结果一颗雷照样解决，玩家根本看不到盾存在过。
+   * 600 高于最强非 BOSS 单位（精英 heavy 496），所以无盾目标仍然一发清；
+   * 带盾目标按下面的 bombShieldPass 结算（盾吸收大头，本体最多掉三成）。 */
+  bombDmg: 600,
+  /* 保险对"带盾目标"的溢出上限：破盾之后，本体最多吃 30% 血。
+   * 全不给溢出 → 一颗雷在带盾单位面前只剩"破盾"，清场感全没了；
+   * 按剩余伤害全传 → 盾又变回纯延迟，和 3.37 之前没区别。
+   * 30% 的含义：护盾确实救了一条命，但这一发雷也没白扔（残血两枪就收）。 */
+  bombShieldPass: 0.30,
+  /* 保险对**小 BOSS** 的伤害上限：按最大血量的比例封顶（3.40）。
+   * 上面那条"无盾必秒"对小 Boss 是一颗雷跳过整场战斗——小 BOSS 偏偏是全关
+   * 唯一需要读招的单位（俯冲 / 狙击 / 偏折各有解法），被一键抹掉等于这段设计
+   * 不存在。用比例而不是固定值：血量随关卡从 400 涨到 820，一颗雷永远只削
+   * 35%，后期不会因为血厚又回到"雷一下解决"，也不会因为血薄就变成废招。 */
+  bombMiniPass: 0.40,
+  bombBossDmg: 160,         // BOSS 轮廓被罩住时的固定伤害（部件与浮游炮同价）
   bombSnakeDmg: 180,        // 蛇头只吃这些，避免一颗雷直接删掉整条蛇
   bombSnakeSegDmg: 90,      // 蛇身同理：一颗雷罩住三四节就白赚几千分，必须压低
   bombCd: 0.9,              // 普通保险冷却（从按下算）：比 0.35s 引信长，连点不会在上一颗还在飞时又扔一颗
@@ -421,17 +438,19 @@ const WAVE_TUNE = { timeScale: 0.80, gapScale: 0.68 };
  * 四者都带时限，所以不会把长期平衡拉偏，可以在关卡里放开掉。
  */
 const TEMP = {
-  /* 3.36 统一拉长了所有临时增益的持续时间（护盾 30→42、追踪 14→22、
-   * 宽头 14→22、僚机 20→30）。理由是这些道具的"爽点"全在效果本身，
-   * 而旧时长刚好卡在"刚发现自己在用、它就到点了"的位置：
-   * 追踪弹一轮 14 秒只够打两三个编队，玩家记住的是"我捡了它，然后它没了"。
-   * 拉长之后一件道具能覆盖一整段波次节奏（约 2~3 个编队 + 一次小 BOSS），
-   * "这一关怎么打"的差别才真的能被感知到。 */
+  /* 3.40 把五件临时增益统一到 **35 秒**（盾 42→35、追踪 22→35、
+   * 宽头 22→35、雷电 26→35、僚机 30→35）。
+   *
+   * 3.36 起它们是各自拉长的（"爽点全在效果本身"），结果是玩家记不住任何一件
+   * 到底能撑多久——HUD 上四条进度条的刻度各不相同，读起来反而更费劲。
+   * 统一后只有一条心理量尺：**一件道具 ≈ 两段波次**，捡到什么都是这个价。
+   * 护盾从 42 降到 35 是为这条量尺让路：它的耐久（30 发）才是真正的上限，
+   * 42 秒里绝大多数时候是"子弹没打空、时间先到"，时限给长了没有意义。 */
   /* 护盾：机头前方一块椭圆光罩，只吃子弹不吃撞机。
    * hp 按"颗"算而不是按伤害：子弹伤害 1~3 差异大，按伤害算会让
    * 高伤弹幕（BOSS 散射）几发就碎，玩家根本看不出护盾存在过。 */
   shield: {
-    dur: 42,        // 持续时间（秒）
+    dur: 35,        // 持续时间（秒）——五件临时增益统一 35，见本段开头
     hp: 30,         // 可挡子弹数
     rx: 30,         // 判定椭圆半径（横向）
     ry: 25,         // 判定椭圆半径（纵向）
@@ -448,13 +467,15 @@ const TEMP = {
    * 追踪速率 5.2 rad/s 比导弹武器（5.5）略低：这是"额外火力"，不该比专门
    * 玩追踪的导弹还灵，否则拿到它就没有换武器的理由。 */
   track: {
-    dur: 22, cd: 0.62, dmg: 7, sp: 430, r: 13,
+    /* r 是**判定**半径，13→16（3.42）：弹体视觉放大到 30×44 且带尾焰之后，
+     * 判定还停在 13 会出现"尾焰扫过敌机却没命中"，玩家只当它是穿透弹。 */
+    dur: 35, cd: 0.62, dmg: 7, sp: 430, r: 16,
     homing: 5.2, boomR: 38, boomDmg: 3
   },
   /* 宽头弹：巨弹，沿途吸掉敌方子弹。
    * 射速 0.26s、单发只有 3 伤害——它的价值在"开路"，不在输出。 */
   wide: {
-    dur: 22, cd: 0.26, dmg: 3, sp: 940, r: 17
+    dur: 35, cd: 0.26, dmg: 3, sp: 940, r: 17
   },
   /* 雷电（3.36）：和电弧炮同样是链式，但打法完全相反——
    * 电弧炮是"朝前打、打到谁算谁"，雷电是"先看周围有没有目标，有才落雷"，
@@ -471,14 +492,14 @@ const TEMP = {
    * 它是"临时"的，不能盖过正式武器。
    * cd 0.42 比电弧炮的 0.24 慢：一次落雷打一片，频率再高就变成自动清屏。 */
   thunder: {
-    dur: 26, cd: 0.42, range: 560, jumpR: 190,
+    dur: 35, cd: 0.42, range: 560, jumpR: 190,
     dmg: 10, hops: 4, falloff: 1.2, minDmg: 3,
     color: 'rgba(198,162,255,0.95)',
     retry: 0.08       // 周围没敌人时的重试间隔：敌人一进圈就立刻落雷
   },
   /* 临时僚机：跟在机身正下方，主槽同款弹道、火力 0.6 倍 */
   ally: {
-    dur: 30, mul: 0.6, powMax: 2, oy: 46
+    dur: 35, mul: 0.6, powMax: 2, oy: 46
   }
 };
 
@@ -512,7 +533,11 @@ const DROPS = [
    * 现在把这两条压下去，省出来的份额给临时增益（S/T/D/A）——
    * 那些是"这一关怎么打"的变化，不是"数值一直往上爬"。 */
   { kind: 'W', w: 3.0, from: 1 },   // 换武器 / 同款升级
-  { kind: 'B', w: 2.6, from: 1 },   // 保险 +1
+  /* B 权重 2.6 → 1.3（3.39）：保险是全表唯一"按一下解决一屏"的道具，
+   * 之前三条投放路线（击破 10.6% / 四周补给 11.2% / BOSS 空投 12%）叠起来
+   * 一关能攒到七八颗，玩家不再需要为"什么时候用雷"做取舍。
+   * 压到约 5.6% 之后，一关稳定在两三颗，雷重新变成要算着用的资源。 */
+  { kind: 'B', w: 1.3, from: 1 },   // 保险 +1
   /* 3.33：H 从"生命 +1"改为"回血（半条）"。
    * 命现在是稀缺资源（只来自分数奖励 + 极稀有的 E），所以 H 不再需要压到最低权重——
    * 它是"这一局还撑得住"的补给，不是"多一条命"。 */
@@ -526,14 +551,14 @@ const DROPS = [
   /* --- 临时增益：掉率最低的常驻条目之外，四条主力全部上调 ---
    * 解锁关整体提前两档（S 3 / T 4 / D 5 / A 6），
    * 否则前五六关只有 P/W/B/H，玩家感觉不到"打过的东西在变"。 */
-  { kind: 'S', w: 2.4, from: 3 },   // 护盾（42s）
-  { kind: 'T', w: 2.2, from: 4 },   // 高爆追踪弹（22s）
-  { kind: 'D', w: 2.2, from: 5 },   // 宽头弹（22s）
+  { kind: 'S', w: 2.4, from: 3 },   // 护盾（35s）
+  { kind: 'T', w: 2.2, from: 4 },   // 高爆追踪弹（35s）
+  { kind: 'D', w: 2.2, from: 5 },   // 宽头弹（35s）
   /* 雷电（3.36）：第 5 关起和宽头弹同档。
    * 前四关的道具位已经很挤（P/W/B/H + 三种临时增益），再早塞第五种，
    * 玩家一件都记不住；第 5 关起敌人开始成编队包夹，它的价值才显出来。 */
-  { kind: 'Z', w: 2.2, from: 5 },   // 雷电（26s）
-  { kind: 'A', w: 2.2, from: 6 }    // 临时僚机（30s）
+  { kind: 'Z', w: 2.2, from: 5 },   // 雷电（35s）
+  { kind: 'A', w: 2.2, from: 6 }    // 临时僚机（35s）
 ];
 
 /** 临时增益的解锁关：BOSS 空投 / 四周补给按它过滤，
@@ -571,7 +596,7 @@ function dropTable(stageId) {
 const EDGE_SUPPLY = [
   { kind: 'W', w: 2.6, from: 1 },
   { kind: 'P', w: 0.7, from: 1 },
-  { kind: 'B', w: 2.2, from: 1 },
+  { kind: 'B', w: 1.1, from: 1 },   // 3.39 与击破掉落同步腰斩（2.2 → 1.1）
   { kind: 'H', w: 1.3, from: 1 },
   /* 四周补给里的加命：同样压到几乎看不见（≈ 每 40~50 份里才有一份） */
   { kind: 'E', w: 0.08, from: 3 },
@@ -673,7 +698,12 @@ const ENEMY_DEFS = {
   // 潜伏者：从屏幕底部升起，出现前底部会有警示
   riser:     { sprite: 'e_diver',     hp: 11,  speed: 132, score: 260, r: 0.60, ai: 'riser',    fire: 1.4 },
   // 中型机：底部升起 → 顶部巡游 → 三向散射，带独立血条
-  miniboss:  { sprite: 'e_heavy',     hp: 300, speed: 58,  score: 2400, r: 0.72, ai: 'miniboss',
+  /* 小 BOSS 血量在 3.40 整体上调约 1.4~1.7 倍（miniboss 300→400，
+   * 变体 380/520/340 → 600/720/560）。旧血量在满配火力下 2 秒就碎，
+   * 加上保险一发就能按掉，玩家根本没机会看清它怎么出招。
+   * 血量只是"能撑几秒"的一半：另一半是 PLAYER.bombMiniPass——
+   * 一颗雷只削 35%，否则血量给多厚都是一发雷的事。 */
+  miniboss:  { sprite: 'e_heavy',     hp: 400, speed: 58,  score: 2400, r: 0.72, ai: 'miniboss',
                fire: 1.7, scale: 1.62 },
 
   /* 棱镜机：正面一张偏折面，把玩家子弹**拨偏**而不是吃掉。
@@ -695,14 +725,14 @@ const ENEMY_DEFS = {
   /* --- 小 BOSS 变体：都是 ai:'miniboss'（同一条"升起 → 巡游"宿主流程），
    * 差异在 mb 字段决定的开火/机动方式。这样不用复制三遍爬升与血条逻辑。 --- */
   // 狙击手：巡游时每 5.6 秒打一发狙击弹（频率必须低，否则整屏都是加速弹）
-  mbSniper:  { sprite: 'e_torpedo',   hp: 380, speed: 58,  score: 2600, r: 0.72, ai: 'miniboss',
+  mbSniper:  { sprite: 'e_torpedo',   hp: 600, speed: 58,  score: 2600, r: 0.72, ai: 'miniboss',
                fire: 5.6, scale: 2.15, mb: 'sniper' },
   // 棱镜：整块偏折面（±59°、26 发、过载 3.2 秒），正面硬顶，必须靠齐射破盾或绕后
-  mbPrism:   { sprite: 'e_shield',    hp: 520, speed: 56,  score: 2800, r: 0.74, ai: 'miniboss',
+  mbPrism:   { sprite: 'e_shield',    hp: 720, speed: 56,  score: 2800, r: 0.74, ai: 'miniboss',
                fire: 2.1, scale: 1.95, mb: 'prism',
                deflect: { aim: Math.PI / 2, arc: 2.06, cap: 26, down: 3.2, bend: 1.05 } },
   // 冲角：巡游 → 锁定（0.7s 红色预警线）→ 高速俯冲穿过玩家 → 爬回原位
-  mbRam:     { sprite: 'e_diver',     hp: 340, speed: 60,  score: 2600, r: 0.72, ai: 'miniboss',
+  mbRam:     { sprite: 'e_diver',     hp: 560, speed: 60,  score: 2600, r: 0.72, ai: 'miniboss',
                fire: 4.8, scale: 1.98, mb: 'ram' },
 
   /* 蛇形小 BOSS 的部件：不走自己的 AI，位置由 game._updateSnake 沿路径写入。
@@ -992,7 +1022,7 @@ const LEVELS = [
       { at: 26.5, kind: 'looper', n: 4, form: 'vee',    speed: 116, gap: 0.28 },
       { at: 30.0, kind: 'shield', n: 3, form: 'sides',  speed: 68,  gap: 0.6 },
       { at: 33.0, kind: 'drone',  n: 7, form: 'grid',   speed: 152, gap: 0.09 },
-      { at: 34.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 290 },
+      { at: 34.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 460 },
       { at: 34.8, kind: 'mbRam',    n: 1, form: 'line', speed: 60,  gap: 0.28, lane: 0.5 }
     ]
   },
@@ -1033,7 +1063,7 @@ const LEVELS = [
       { at: 29.5, kind: 'flame',  n: 7, form: 'line',   speed: 100, gap: 0.26 },
       { at: 33.0, kind: 'mirror', n: 8, form: 'cross',  speed: 102, gap: 0.20 },
       { at: 36.0, kind: 'flame',  n: 7, side: 'left',   gap: 0.16 },   // 从左侧切入：喷火机贴边压过来
-      { at: 37.0, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 300 },
+      { at: 37.0, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 520 },
       { at: 37.3, kind: 'mbSniper', n: 1, form: 'line', speed: 56,  gap: 0.28, lane: 0.5 }
     ]
   },
@@ -1078,7 +1108,7 @@ const LEVELS = [
       { at: 31.2, kind: 'mineH',  n: 3, side: 'right', gap: 0.5 },   // 侧向飘入的浮雷：打爆照样十六向溅射
       { at: 33.0, kind: 'riser',  n: 6, form: 'sides',  speed: 144, gap: 0.32 },
       { at: 36.5, kind: 'sniper', n: 5, form: 'arc',    speed: 64,  gap: 0.6 },
-      { at: 39.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 310 },
+      { at: 39.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 600 },
       { at: 39.8, kind: 'mbPrism',  n: 1, form: 'line', speed: 56,  gap: 0.28, lane: 0.5 }
     ]
   },
@@ -1123,7 +1153,7 @@ const LEVELS = [
       { at: 33.0, kind: 'flame',    n: 6, form: 'vee',     speed: 104, gap: 0.22 },
       { at: 36.5, kind: 'heavy',    n: 3, form: 'pincer',  speed: 52,  gap: 0.9 },
       { at: 40.0, kind: 'kamikaze', n: 6, form: 'diamond', speed: 174, gap: 0.16 },
-      { at: 42.0, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 320, lane: 0.18 },
+      { at: 42.0, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 660, lane: 0.18 },
       { at: 42.3, kind: 'mbRam',    n: 1, form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
       { at: 42.3, kind: 'mbSniper', n: 1, form: 'line',    speed: 56,  gap: 0.28, lane: 0.82 }
     ]
@@ -1171,7 +1201,7 @@ const LEVELS = [
       { at: 40.0, kind: 'mirror',   n: 6, form: 'wave',    speed: 110, gap: 0.18 },
       // 中段小 BOSS：波次放到一半时插一组，避免整关只有"蛇"一个记忆点；
       // 和末段蛇错开 21 秒，玩家有两段明确的"停下来打大目标"的窗口
-      { at: 23.5, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 330, lane: 0.32 },
+      { at: 23.5, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 720, lane: 0.32 },
       { at: 23.8, kind: 'mbPrism',  n: 1, form: 'line',    speed: 56,  gap: 0.28, lane: 0.68 },
       /* 第三只：小 BOSS 同屏上限就是 3，三路分 Lane 才算"能同时应付"，
        * 不给 lane 会挤在中线互相掩护，玩家连一个都打不穿。 */
@@ -1223,12 +1253,12 @@ const LEVELS = [
       { at: 40.0, kind: 'kamikaze', n: 7,  form: 'diamond', speed: 178, gap: 0.14 },
       { at: 43.5, kind: 'eel',      n: 7,  form: 'cross',   speed: 104, gap: 0.24 },
       // 中段小 BOSS：和前八关一样"波次过半来一波"，双蛇仍然独占最后 10 秒
-      { at: 24.0, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 360 },
+      { at: 24.0, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 820 },
       { at: 24.3, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },
       /* 尾段再加一只：终局关不能"打完中段小 BOSS 就只剩躲弹"，
-       * 41 秒这只把压力续到双蛇登场，血量用普通 380（不用棱镜），
-       * 免得它拖着 520 血活到 50 秒和双蛇叠在一起。 */
-      { at: 41.0, kind: 'miniboss', n: 1,  form: 'line',    speed: 58,  gap: 0.28, hp: 380, lane: 0.5 },
+       * 41 秒这只把压力续到双蛇登场，血量用 620（比前一只 820 薄），
+       * 免得它拖着厚血活到 50 秒和双蛇叠在一起。 */
+      { at: 41.0, kind: 'miniboss', n: 1,  form: 'line',    speed: 58,  gap: 0.28, hp: 620, lane: 0.5 },
 
       // 压轴：双蛇对向游走（各 1250 头血 / 7 节 × 160，单条射速降 42%）
       { at: 50.0, kind: 'snake',    n: 2 }

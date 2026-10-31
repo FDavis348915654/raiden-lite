@@ -8,6 +8,10 @@ const BOMB_BTN = { x: VIEW.w - 34, y: VIEW.h - 28, r: 22 };
 const LASER_BTN = { x: VIEW.w - 92, y: VIEW.h - 28, r: 22 };
 // 声音开关：放在两个保险按钮上方，竖着排，避免和手指操作区抢位置
 const SOUND_BTN = { x: VIEW.w - 34, y: VIEW.h - 78, r: 18 };
+/* 暂停：贴在 HUD 右上角血条下方（y 72），不在手指操作区里。
+ * 放右下角那一列会更"顺手"，但那里是拖飞机的必经之路——
+ * 想横移却按到暂停，比暂停难按烦人得多。 */
+const PAUSE_BTN = { x: VIEW.w - 28, y: 74, r: 13 };
 // HUD 武器槽：点击槽位即切换主武器（伤害 100% 的那格）。
 // 坐标只有这一份——绘制和点击热区共用，否则以后挪 HUD 必然错位。
 const SLOT_UI = { x: 18, y: 62, w: 74, h: 18, gap: 5 };
@@ -345,6 +349,16 @@ class Game {
       // 声音开关：标题页、暂停中、结算页都能切，所以放在暂停恢复之前
       if (dist2(p.x, p.y, SOUND_BTN.x, SOUND_BTN.y) < (SOUND_BTN.r + 12) * (SOUND_BTN.r + 12)) {
         this.toggleSound();
+        return;
+      }
+
+      /* 暂停按钮（3.40）：HUD 右上角血条下方的小圆。
+       * 判定必须排在"暂停中任意点击恢复"之前——暂停中点它也要能恢复，
+       * 如果先被那条分支吃掉，它会走进自己分支里把 paused 再设一次 true，
+       * 表现为"点了按钮没反应、点别处才恢复"。 */
+      if (dist2(p.x, p.y, PAUSE_BTN.x, PAUSE_BTN.y) < (PAUSE_BTN.r + 10) * (PAUSE_BTN.r + 10)) {
+        if (this.paused) this.paused = false;
+        else this.togglePause();
         return;
       }
 
@@ -942,7 +956,7 @@ class Game {
       });
     }
 
-    // 2) 圈内小怪：秒杀（血量再高也清），蛇头例外
+    // 2) 圈内小怪：无盾一律清场，带盾的由护盾先吃（3.39）
     // _bombing 置位期间 onEnemyKilled 不掉道具，否则一颗雷能刷满地道具
     this._bombing = true;
     for (const e of this.enemies) {
@@ -950,11 +964,55 @@ class Game {
       if (dist2(b.x, b.y, e.x, e.y) > (R + e.r) * (R + e.r)) continue;
       if (e.kind === 'snakeHead') e.hit(PLAYER.bombSnakeDmg, null, this);
       else if (e.kind === 'snakeBody') e.hit(PLAYER.bombSnakeSegDmg, null, this);
-      else e.hit(9999, null, this, { ignoreShield: true });
+      else if (isMiniKind(e.kind)) {
+        /* 小 BOSS（3.40）：一颗雷只削 bombMiniPass 比例的血，**不秒**。
+         * 下面那条 max(bombDmg, maxHp+1) 是给杂兵保"无盾必清"的，套到小 BOSS
+         * 身上就是"按一下跳过整段战斗"——而小 BOSS 是全关唯一需要读招的单位。
+         * 护盾照常先吃，破盾后按 bombShieldPass 溢出，两套规则叠加后
+         * 带盾小 BOSS 挨一发雷最多掉 35%。 */
+        e.hit(e.maxHp * PLAYER.bombMiniPass, null, this,
+          { overflow: PLAYER.bombShieldPass });
+      }
+      else {
+        /* 伤害取 max(bombDmg, 本体血量)——保证"无盾必秒"这件事不依赖某个魔数
+         * 恰好大于最强杂兵的血量，以后加更厚的机型也不会漏成"一发雷打不死 scout"。
+         * 第四个参数不再是 ignoreShield（那会让盾完全失效），改成 overflow：
+         * 盾照常吸收，破盾后本体最多吃 bombShieldPass 比例的血。 */
+        e.hit(Math.max(PLAYER.bombDmg, e.maxHp + 1), null, this,
+          { overflow: PLAYER.bombShieldPass });
+      }
     }
-    // 3) BOSS：轮廓只要被爆炸圈罩住就吃固定伤害（用与撞机/子弹同一套轮廓判定）
-    if (this.bossActive && !this.boss.dead && this._bossHits(this.boss, b.x, b.y, R)) {
-      this.boss.hit(PLAYER.bombBossDmg, this);
+    /* 3) BOSS：本体按轮廓判定吃固定伤害；可破坏部件与浮游炮单独结算。
+     * 以前这里只打本体，玩家看着爆炸圈把两侧炮台整个罩住、炮台血条纹丝不动
+     * （3.39 修）。判定半径沿用子弹命中那一套（部件 pt.r、浮游炮 13），
+     * 浮游炮的坐标也必须和子弹路径一样夹在 36~W-36，否则贴边时会打空。 */
+    if (this.bossActive && !this.boss.dead) {
+      const bo = this.boss;
+      for (const pt of bo.parts) {
+        if (!pt.alive) continue;
+        const px = bo.x + pt.dx, py = bo.y + pt.dy;
+        if (dist2(b.x, b.y, px, py) > (R + pt.r) * (R + pt.r)) continue;
+        pt.hp -= PLAYER.bombBossDmg;
+        pt.flash = 0.08;
+        if (pt.hp <= 0) {
+          pt.alive = false;
+          this.onBossPartDestroyed(bo, pt);
+        }
+      }
+      for (const d of bo.drones) {
+        if (!d.alive) continue;
+        const px = clamp(bo.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
+        const py = bo.y + Math.sin(d.ang) * d.r;
+        if (dist2(b.x, b.y, px, py) > (R + 13) * (R + 13)) continue;
+        d.hp -= PLAYER.bombBossDmg;
+        d.flash = 0.08;
+        if (d.hp <= 0) {
+          d.alive = false;
+          this.onDroneDestroyed(bo, d, px, py);
+        }
+      }
+      // 本体放在部件之后：hit() 可能直接把 BOSS 打死并触发结算流程
+      if (!bo.dead && this._bossHits(bo, b.x, b.y, R)) bo.hit(PLAYER.bombBossDmg, this);
     }
     this._bombing = false;
 
@@ -1282,6 +1340,19 @@ class Game {
   }
 
   /** 已有同款武器：这一把单独升一级 */
+  /** 受击降级（3.40）：主武器槽被击中，火力直接掉回 L1。
+   *  用武器提示位弹一次而不是只改 HUD 数字——一局里这条线很少触发，
+   *  但每次触发都是"刚才那一下让我变弱了"的关键信息，玩家必须看见。
+   *  颜色固定用警示红，不跟着武器色走，否则和"吃到同款升级"的提示长得一样。 */
+  onWeaponLevelDrop(p, slot, from, to) {
+    const idx = p.weapons[slot];
+    if (idx === undefined) return;
+    this.wpnTitle = WEAPONS[idx].name + ' 受损';
+    this.wpnSub = 'LV' + from + ' → LV' + to + ' · 主武器槽吃了一下';
+    this.wpnColor = '#ff6b6b';
+    this.wpnToastT = 1.6;
+  }
+
   onWeaponDup(p, idx, lv) {
     this.wpnTitle = WEAPONS[idx].name;
     this.wpnSub = 'LV' + lv + ' / ' + PLAYER.maxPower +
@@ -1820,12 +1891,14 @@ class Game {
           /* BOSS 战的空投也改口味：P/W 各让一档，其余给临时增益。
            * BOSS 战十几秒只有一个目标，临时增益（护盾/追踪弹/宽头弹/僚机）
            * 在这里的存在感最高——它们是"这 14 秒怎么打"，比再升一级更可感。 */
+          /* B 的档位 12% → 8%（3.39）：BOSS 战打得久、空投频率又是 8 秒一次，
+           * 这条路线单独就能在一场里送出大半颗雷，把另外两条压下去也白压。 */
           const roll = Math.random();
           let kind;
           if (roll < 0.28) kind = 'P';
-          else if (roll < 0.40) kind = 'W';
-          else if (roll < 0.52) kind = 'B';
-          else if (roll < 0.62) kind = 'H';
+          else if (roll < 0.41) kind = 'W';
+          else if (roll < 0.49) kind = 'B';
+          else if (roll < 0.60) kind = 'H';
           else {
             const pool = ['S', 'T', 'D', 'Z', 'A'].filter(k => TEMP_FROM[k] <= this.level.id);
             kind = pool.length ? pick(pool) : 'B';
@@ -2640,15 +2713,23 @@ class Game {
    *  如果吞一颗就消失，最多清十几颗，玩家根本感觉不到这道具存在过。 */
   _wideSweep(b) {
     const rr = b.r + 14;             // 比弹体略大：贴图边缘蹭到也算
+    let n = 0;
     for (const e of this.bullets) {
       if (!e.active || e.friendly) continue;
       const dx = e.x - b.x, dy = e.y - b.y;
       if (dx * dx + dy * dy > rr * rr) continue;
       e.active = false;
+      /* 粒子朝刃心收，而不是原地散开（3.42）：原地炸开读起来像"这颗弹自己碎了"，
+       * 只有向心才读得出"被这道光刃吃掉了"。 */
+      const d = Math.hypot(dx, dy) || 1;
       this.addParticle(e.x, e.y, {
-        vx: rand(-30, 30), vy: rand(-40, 10), life: 0.2, r: 3, color: '#7bffcf'
+        vx: -dx / d * 260, vy: -dy / d * 260, life: 0.16, r: 3.4,
+        color: '#d6fff4', drag: 0.82
       });
+      n++;
     }
+    // 吞到东西就让刃体闪一下，见 Bullet._tempFx；没吞到不闪，否则整条弹道都在发白光
+    if (n) b.suckT = 0.10;
   }
 
   /** 偏折面：把正面（护盾法线 ±arc/2）射进来的玩家子弹拨开。
@@ -3451,6 +3532,7 @@ class Game {
 
     this._drawBombButton(ctx);
     this._drawLaserButton(ctx);
+    this._drawPauseButton(ctx);
   }
 
   /** 武器槽：WEAPON_SLOTS 个胶囊（当前 4 个），主武器（伤害 100%）高亮，空槽虚线。
@@ -3676,6 +3758,27 @@ class Game {
     ctx.restore();
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+  }
+
+  /** 暂停按钮：HUD 右上角的小圆，两根竖条。
+   *  只负责"进暂停"——恢复走点击屏幕任意处（暂停遮罩上已经这么写）。
+   *  一个按钮两种语义会让玩家在暂停页上先愣一下"该点哪"。
+   *  外圈刻意画得比保险按钮淡：它不需要被注意到，只需要被找到。 */
+  _drawPauseButton(ctx) {
+    const { x, y, r } = PAUSE_BTN;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(18,26,36,0.66)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150,205,240,0.34)';
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(196,228,252,0.86)';
+    ctx.fillRect(x - 4.4, y - 5.6, 3.1, 11.2);
+    ctx.fillRect(x + 1.3, y - 5.6, 3.1, 11.2);
+    ctx.restore();
   }
 
   _drawSoundButton(ctx) {
@@ -4471,7 +4574,7 @@ class Game {
       ctx.fillText('PAUSED', cx, VIEW.h * 0.46);
       ctx.font = '13px "PingFang SC", sans-serif';
       ctx.fillStyle = 'rgba(150,200,230,0.75)';
-      ctx.fillText('按 ESC / P 继续', cx, VIEW.h * 0.46 + 36);
+      ctx.fillText('点击屏幕任意处继续', cx, VIEW.h * 0.46 + 36);
       ctx.restore();
       ctx.textAlign = 'left';
     }

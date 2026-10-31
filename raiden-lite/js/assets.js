@@ -76,8 +76,49 @@ const Assets = {
     // 临时武器：追踪弹偏暖橙（和绿色导弹区分），宽头弹是横向拉宽的青绿光刃。
     // 宽头弹的贴图必须"横着长"：它的作用是挡弹开路，视觉上要像一堵墙，
     // 做成圆球会被误认成又一种普通子弹。
-    this.bulletSprites.track = make(22, 34, '#fff3dd', 'rgba(255,150,70,0.95)');
-    this.bulletSprites.wide = make(54, 18, '#eaffff', 'rgba(80,255,210,0.90)');
+    // 3.42：追踪弹弹体放大到 26×38（原 22×34）并把尾焰交给 Bullet._tempFx
+    // 画成 60px 的喷流；判定半径同步 13→16。
+    // 弹头刻意不做太大：它体积感的主要来源是尾焰，弹头再胀就成"橙色糖球"了。
+    this.bulletSprites.track = make(26, 38, '#fff6e4', 'rgba(255,150,70,0.95)');
+
+    /* 宽头弹单独烘焙：它是一道横向能量刃，不是"又一种子弹"。
+     * 通用 make() 的核是椭圆，铺在横向画布上还是像个扁球；
+     * 这里用横向线性渐变 + 两端收尖的刃形，才读得出"一堵墙压过来"。 */
+    const makeBar = (w, h) => {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const g = c.getContext('2d');
+      const cx = w / 2, cy = h / 2;
+      // 外层光晕：圆形渐变压在缩放后的坐标系里画成横向椭圆
+      g.save();
+      g.translate(cx, cy);
+      g.scale(1, h / w);
+      const halo = g.createRadialGradient(0, 0, 0, 0, 0, cx);
+      halo.addColorStop(0, 'rgba(210,255,245,0.80)');
+      halo.addColorStop(0.5, 'rgba(80,255,210,0.40)');
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = halo;
+      g.beginPath();
+      g.arc(0, 0, cx, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+      // 刃体：横向渐变的亮带，两端收尖
+      const blade = g.createLinearGradient(0, 0, w, 0);
+      blade.addColorStop(0, 'rgba(140,255,225,0)');
+      blade.addColorStop(0.16, 'rgba(160,255,232,0.85)');
+      blade.addColorStop(0.5, 'rgba(255,255,255,0.98)');
+      blade.addColorStop(0.84, 'rgba(160,255,232,0.85)');
+      blade.addColorStop(1, 'rgba(140,255,225,0)');
+      g.fillStyle = blade;
+      g.beginPath();
+      g.moveTo(0, cy);
+      g.quadraticCurveTo(cx, cy - h * 0.36, w, cy);
+      g.quadraticCurveTo(cx, cy + h * 0.36, 0, cy);
+      g.closePath();
+      g.fill();
+      return c;
+    };
+    this.bulletSprites.wide = makeBar(54, 20);
   },
 
   frame(name) {

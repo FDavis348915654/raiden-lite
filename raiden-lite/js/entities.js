@@ -26,6 +26,7 @@ class Bullet {
     this.fuse = opt.fuse === undefined ? 0 : opt.fuse;  // 引信：到时炸开
     this.chain = opt.chain || 0;    // 电弧链式跳数
     this.wideBlock = !!opt.wideBlock;  // 宽头弹：飞行途中吸掉敌方子弹
+    this.suckT = 0;                 // 宽头弹刚吞掉一颗敌弹：刃体闪一下（池对象，必须复位）
     /* 狙击弹：两段速度。前半段几乎"悬停"滑行（96px/s），snipe.delay 秒后
      * 沿**发射瞬间**的方向猛加速到 snipe.speed。
      * 不做跟踪是有意的：跟踪弹玩家只能靠躲，狙击弹可以靠"看红环 → 横移"破。 */
@@ -43,6 +44,7 @@ class Bullet {
     if (this.bossT > 0) this.bossT -= dt;
     if (this.defT > 0) this.defT -= dt;
     if (this.boostFx > 0) this.boostFx -= dt;
+    if (this.suckT > 0) this.suckT -= dt;
 
     // 狙击弹的"起爆"：只改速度大小，方向沿用发射时算好的那一条
     if (this.snipeT > 0) {
@@ -99,6 +101,7 @@ class Bullet {
   }
 
   draw(ctx) {
+    this._tempFx(ctx);
     Assets.drawBullet(ctx, this.kind, this.x, this.y, this.rot);
 
     // 狙击弹的蓄力段：一圈从外向内收的红色准星环 + 一小段方向线。
@@ -145,6 +148,91 @@ class Bullet {
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  /* 临时武器的动态表现（3.42）。贴图只有一帧，动起来才有"能量弹"的分量——
+   * 之前追踪弹和宽头弹各自就一张静态小图，射速又快，玩家看到的是两条
+   * 凭空的色带，读不出"这是花了一个道具换来的火力"。
+   * 全程只用路径 + 已烘焙贴图，**不建任何新渐变**：这两类弹同屏最多十来颗，
+   * 但每帧 createLinearGradient 是这类特效最容易悄悄吃掉帧数的写法。 */
+  _tempFx(ctx) {
+    if (this.kind !== 'track' && this.kind !== 'wide') return;
+    // 宽头弹的残影要复用贴图本体，资源没就绪就整段跳过（别让 draw 依赖外层 try-catch）
+    const sp = this.kind === 'wide' ? Assets.bulletSprites.wide : null;
+    if (this.kind === 'wide' && !sp) return;
+    const a = Math.atan2(this.vy, this.vx);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(a + Math.PI / 2);        // 本地 -y = 前进方向，+y = 拖尾
+    ctx.globalCompositeOperation = 'lighter';
+
+    if (this.kind === 'track') {
+      /* 尾焰三层：暗橙铺长度、亮橙做主体、近白短芯。长度按 life 做相位抖动——
+       * 一条长度恒定的火焰看起来像贴在机身后面的纸片。
+       * 长宽比按 46:9 取：短而宽的火焰读作"桃形光斑"，只有拉长才像在推进。 */
+      const f = 1 + Math.sin(this.life * 52) * 0.16;
+      /* 三层要"越外越透、越内越实"：三层给同一个 alpha 会叠成一块实心橙色，
+       * 看起来像弹体后面拖着一坨颜料，而不是在燃烧。 */
+      const flame = [
+        [62 * f, 10.5, 'rgba(255,96,32,0.20)'],
+        [44 * f, 7.2, 'rgba(255,165,64,0.42)'],
+        [26 * f, 4.2, 'rgba(255,246,220,0.85)']
+      ];
+      for (const [len, w, col] of flame) {
+        ctx.beginPath();
+        ctx.moveTo(-w, 0);
+        ctx.quadraticCurveTo(-w * 0.5, len * 0.74, 0, len);
+        ctx.quadraticCurveTo(w * 0.5, len * 0.74, w, 0);
+        ctx.closePath();
+        ctx.fillStyle = col;
+        ctx.fill();
+      }
+      // 尾端飘散的碎火：让"喷出来"这件事一直有东西在收尾，不至于一刀切在光晕边缘
+      for (let i = 0; i < 3; i++) {
+        const p = (this.life * 3.1 + i / 3) % 1;      // 0→1 循环
+        ctx.globalAlpha = (1 - p) * 0.55;
+        ctx.fillStyle = 'rgba(255,150,60,1)';
+        ctx.beginPath();
+        ctx.arc(Math.sin(p * 9 + i) * 5, 18 + p * 42 * f, 2.6 * (1 - p * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = 'rgba(255,150,70,1)';
+      ctx.beginPath();
+      ctx.arc(0, 2, 13.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      /* 宽头弹：一道横向能量刃。拖尾直接复用**同一张刃的贴图**做两帧残影
+       * （递减横向缩放 + 递减 alpha）——同形状的残影读作运动模糊，
+       * 换成椭圆或方块就会变成"子弹后面挂着个东西"。
+       * 两端各点一颗亮核：它的判定只有圆 r17，视觉横向却有 54px，
+       * 端点亮度是玩家判断"这条刃扫到哪了"的唯一参照。 */
+      const breath = 1 + Math.sin(this.life * 26) * 0.06;
+      const hw = 27 * breath;
+      for (const [off, k, al] of [[15, 1.0, 0.26], [29, 0.84, 0.13]]) {
+        ctx.globalAlpha = al;
+        ctx.drawImage(sp, -sp.width * k / 2, off - sp.height / 2, sp.width * k, sp.height * k);
+      }
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(210,255,245,0.85)';
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(sx * hw, 0, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (this.suckT > 0) {
+        // 吞弹的一瞬间整条刃外扩亮一下：没有这个反馈，玩家根本不知道它在吃弹，
+        // 只会觉得"这波弹幕怎么自己少了"
+        ctx.globalAlpha = Math.min(1, this.suckT / 0.10) * 0.7;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, hw * 1.14, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
   }
 }
 
@@ -1147,6 +1235,23 @@ class Player {
     game.onPlayerHurt();
     // 掉血也要有机体反馈：小爆炸 + 闪白，否则玩家只看 HUD 血条会"不知道自己挨了"
     game.explode(this.x, this.y, 0.9, '#7fd6ff', 14);
+    /* 受击惩罚（3.42）：1 号位（主武器槽）火力 **-1 级**。
+     * 3.40 写的是"一次到底"（直接按回 L1），实测太狠：血量制下 1.6 秒无敌只挡住
+     * 连扣，挡不住"一发弹把三关攒的火力线抹平"，中弹一次就得重新捡一路 W 回来。
+     * 现在改成只掉一级——代价仍然明确（L5 挨一发变 L4，掉到 L1 要挨四下），
+     * 但不会因为一次走位失误把整局节奏推翻。
+     * 只动 `lv[0]`：惩罚落在"主武器这个位置"上，副位原样，玩家可以切枪继续打。
+     * 已经是 L1 就不扣（没有可降的空间），也不弹提示。
+     * 这一发致命时跳过：爆机本来就有"扣命 + 散落降 1 级"两重代价，
+     * 再叠一次等于同一颗弹罚两遍。 */
+    if (this.hp > 0 && this.lv && this.lv.length > 0) {
+      const cur = this.lv[0] || PLAYER.startPower;
+      if (cur > PLAYER.startPower) {
+        const next = Math.max(PLAYER.startPower, cur - 1);
+        this.lv[0] = next;
+        game.onWeaponLevelDrop(this, 0, cur, next);
+      }
+    }
     if (this.hp <= 0) {
       this.hp = 0;
       this._destroy(game);
@@ -2119,12 +2224,16 @@ class Enemy {
   hit(dmg, bullet, game, opt) {
     if (this.spawnGuard > 0 || this.entryImmune) return false;   // 登场保护期内免疫
     /* 出场护盾：先吃伤害、本体不掉血，打空才轮到真伤。
-     * 溢出不传递：护盾的意义是"挡住一次爆发"，如果一发大弹能打穿薄盾顺带带走
-     * 半条血，护盾在小 BOSS 身上就只剩一个延迟数字。
-     * ignoreShield 给"物理/规则层面"的伤害用（保险清屏、撞机）——
-     * 那些不该由一层能量盾决定结果。dmg >= 500 兜底，防止新调用点漏传参数。 */
-    const pierce = (opt && opt.ignoreShield) || dmg >= 500;
+     * 普通伤害**不溢出**：护盾的意义是"挡住一次爆发"，如果一发大弹能打穿薄盾
+     * 顺带带走半条血，护盾在小 BOSS 身上就只剩一个延迟数字。
+     *
+     * 穿盾只认显式参数（3.39）。之前还额外用 `dmg >= 500` 兜底，本意是"防新调用点
+     * 漏传参数"，实际却把保险（9999）永久钉成了穿透——一颗雷秒掉带盾小 BOSS，
+     * 3.37 刚加的盾等于白加。这种"按数值大小偷偷改变规则"的兜底不能留：
+     * 它不报错，只是让另一套机制静默失效。 */
+    const pierce = !!(opt && opt.ignoreShield);
     if (this.shieldHp > 0 && !pierce) {
+      const before = this.shieldHp;
       this.shieldHp -= dmg;
       this.shieldHit = 0.14;
       if (game) {
@@ -2136,7 +2245,25 @@ class Enemy {
             color: '#cdf4ff'
           });
       }
-      if (this.shieldHp <= 0) this._dropShield(game, true);
+      if (this.shieldHp > 0) return false;
+      this._dropShield(game, true);
+      /* 溢出（3.39）：`opt.overflow` 是"破盾后本体最多吃多少比例的血"，
+       * 目前只有保险传（bombShieldPass 0.30）。
+       * 完全不给溢出 → 一颗雷打带盾单位只剩破盾，清场感全没；
+       * 按剩余伤害全传 → 600 的雷能连盾带机一起带走，又回到"一发解决"。
+       * 用比例封顶而不是绝对值：小怪（52 血）和小 BOSS（380 血）都被打掉三成，
+       * 前者残血两枪收，后者不至于一发雷掉半条。 */
+      const rest = Math.max(0, dmg - before);
+      const cap = opt && opt.overflow ? this.maxHp * opt.overflow : 0;
+      const spill = Math.min(rest, cap);
+      if (spill <= 0) return false;
+      this.hp -= spill;
+      this.flash = 0.08;
+      if (this.hp <= 0) {
+        this.active = false;
+        if (game) game.onEnemyKilled(this);
+        return true;
+      }
       return false;
     }
     // 护盾机：从下方打过来的子弹（正面）只吃 15% 伤害
