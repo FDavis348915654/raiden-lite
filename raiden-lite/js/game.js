@@ -986,7 +986,7 @@ class Game {
      * 以前这里只打本体，玩家看着爆炸圈把两侧炮台整个罩住、炮台血条纹丝不动
      * （3.39 修）。判定半径沿用子弹命中那一套（部件 pt.r、浮游炮 13），
      * 浮游炮的坐标也必须和子弹路径一样夹在 36~W-36，否则贴边时会打空。 */
-    if (this.bossActive && !this.boss.dead) {
+    if (this.bossActive && !this.boss.dead && !this.boss.invuln) {
       const bo = this.boss;
       for (const pt of bo.parts) {
         if (!pt.alive) continue;
@@ -1383,6 +1383,23 @@ class Game {
   /** 临时增益到期：只报一句，不打断战斗 */
   onTempEnd(p, id) {
     this._devToast(TEMP_INFO[id].title + ' 已结束');
+  }
+
+  /** 护盾被打穿（3.45）：和"时间到"不是一回事——它几乎总是发生在玩家
+   *  最危险的一瞬间，所以用武器提示位正经弹一条，而不是走小字 devToast。
+   *  同时把"回血 +15"写在副标题里：光看到血条涨一格，玩家不知道那是护盾给的。 */
+  onShieldBreak(p, amt) {
+    this.wpnTitle = 'SHIELD BROKEN';
+    this.wpnSub = '护盾被打穿 · 回血 +' + amt;
+    this.wpnColor = '#7bffcf';
+    this.wpnToastT = 1.5;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      this.addParticle(p.x, p.y - 24, {
+        vx: Math.cos(a) * 170, vy: Math.sin(a) * 170,
+        life: 0.36, r: 3, color: '#7bffcf'
+      });
+    }
   }
 
   onOptionGained(p) {
@@ -2807,11 +2824,30 @@ class Game {
       // 这个机制就变成了"纯特效"。
       if (this._deflect(b)) continue;
 
-      // 注意：invuln 必须放在外层条件里。
-      // 之前写成 `if (bo.invuln) continue;`，会连下面打小怪的循环一起跳过，
-      // 导致第 7 关 BOSS 退场召唤期间援军完全打不掉、BOSS 永远不回来。
-      if (this.bossActive && !this.boss.dead && !this.boss.invuln) {
-        const bo = this.boss;
+      /* BOSS 命中分两条路（3.46）：无敌期子弹弹开、可打期正常结算。
+       * 结构上不能写成 `if (bo.invuln) continue;`——那会连下面打小怪的
+       * 循环一起跳过，第 7 关 BOSS 退场召唤期间援军会完全打不掉、
+       * BOSS 永远不回来。 */
+      const boss = this.bossActive && !this.boss.dead ? this.boss : null;
+      if (boss && boss.invuln) {
+        /* 无敌期（入场 / 退场）：打上去要**有反应**。
+         * 以前这里整块跳过，子弹从舰体中间穿过去、不留任何痕迹，
+         * 玩家只会觉得打不动、或者干脆以为 BOSS 是张会动的贴图。
+         * 现在照常判定命中、消耗子弹、溅冷色火花、护罩荡开一圈涟漪，
+         * 只是不结算伤害——代价说清楚了，观感也保住了。 */
+        if (boss.barrierHitTest(b.x, b.y, b.r)) {
+          b.active = false;
+          boss.barrierHit(b.x, b.y);
+          for (let i = 0; i < 3; i++) {
+            this.addParticle(b.x, b.y, {
+              vx: rand(-90, 90), vy: rand(-30, 90), life: 0.22, r: 3,
+              color: i ? '#9fe8ff' : '#ffffff'
+            });
+          }
+          SFX.hit();
+        }
+      } else if (boss) {
+        const bo = boss;
 
         // 先判可破坏部件：打掉侧翼武器能实实在在削弱弹幕
         let hitPart = false;
@@ -3607,9 +3643,11 @@ class Game {
     ctx.textAlign = 'left';   // textBaseline 由 restore 还原，别在这里改
   }
 
-  /** 临时增益条：护盾 / 临时武器 / 临时僚机各一条剩时进度。
+  /** 临时增益条：护盾 / 临时武器（可多把）/ 临时僚机各一条剩时进度。
    *  三种效果都是自动到期，不给剩余时间的话玩家只能"感觉好像没了"，
-   *  没法判断该压上去用掉还是该退。护盾额外显示剩余耐久。 */
+   *  没法判断该压上去用掉还是该退。护盾额外显示剩余耐久。
+   *  3.47 起临时武器可以同时在手三把，所以排布改成按 4 条一行折行：
+   *  最挤的情况是 护盾 + 3 把武器 + 僚机 = 5 条，单行会顶到右上角的暂停按钮。 */
   _drawTempHud(ctx) {
     const p = this.player;
     const rows = [];
@@ -3619,46 +3657,47 @@ class Game {
         left: 'SHIELD ' + Math.max(0, Math.ceil(p.shield.hp))
       });
     }
-    if (p.tempWpn) {
-      const C = TEMP[p.tempWpn.id];
-      rows.push({ id: p.tempWpn.id, t: p.tempWpn.t, max: C.dur, left: TEMP_INFO[p.tempWpn.id].title });
+    for (const tw of p.tempWpns) {
+      const C = TEMP[tw.id];
+      rows.push({ id: tw.id, t: tw.t, max: C.dur, left: TEMP_INFO[tw.id].title });
     }
     if (p.tempAlly) {
       rows.push({ id: 'ally', t: p.tempAlly.t, max: TEMP.ally.dur, left: TEMP_INFO.ally.title });
     }
     if (!rows.length) return;
 
-    const w = 82, h = 18, gap = 6, x0 = 18, y0 = 86;
+    const w = 74, h = 18, gap = 6, x0 = 18, y0 = 86, perRow = 4;
     ctx.save();
     ctx.textBaseline = 'middle';
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const info = TEMP_INFO[r.id];
-      const bx = x0 + i * (w + gap);
+      const bx = x0 + (i % perRow) * (w + gap);
+      const by = y0 + Math.floor(i / perRow) * (h + gap);
       const k = clamp(r.t / r.max, 0, 1);
       // 剩不到 3 秒整条闪一下，和游戏里其它"要过期了"的提示保持同一套语言
       const urgent = r.t < 3 && Math.floor(r.t * 6) % 2 === 0;
 
       ctx.globalAlpha = urgent ? 0.55 : 1;
       ctx.fillStyle = 'rgba(8,16,24,0.78)';
-      ctx.fillRect(bx, y0, w, h);
+      ctx.fillRect(bx, by, w, h);
       ctx.strokeStyle = info.color;
       ctx.lineWidth = 1;
-      ctx.strokeRect(bx + 0.5, y0 + 0.5, w - 1, h - 1);
+      ctx.strokeRect(bx + 0.5, by + 0.5, w - 1, h - 1);
 
       // 剩余时间：底部细条，随剩余比例从左往右缩回
       ctx.globalAlpha = (urgent ? 0.55 : 1) * 0.6;
       ctx.fillStyle = info.color;
-      ctx.fillRect(bx + 1, y0 + h - 2.5, (w - 2) * k, 2);
+      ctx.fillRect(bx + 1, by + h - 2.5, (w - 2) * k, 2);
 
       ctx.globalAlpha = urgent ? 0.75 : 1;
       ctx.fillStyle = info.color;
       ctx.font = '8px ui-monospace, monospace';
       ctx.textAlign = 'left';
-      ctx.fillText(r.left, bx + 5, y0 + h / 2);
+      ctx.fillText(r.left, bx + 5, by + h / 2);
       ctx.textAlign = 'right';
       ctx.fillStyle = 'rgba(215,240,255,0.92)';
-      ctx.fillText(Math.ceil(r.t) + 's', bx + w - 5, y0 + h / 2);
+      ctx.fillText(Math.ceil(r.t) + 's', bx + w - 5, by + h / 2);
     }
     ctx.globalAlpha = 1;
     ctx.restore();

@@ -18,6 +18,11 @@ class Bullet {
     this.r = opt.r === undefined ? 7 : opt.r;
     this.kind = opt.kind || 'enemy';
     this.rot = opt.rot === undefined ? Math.atan2(vy, vx) + Math.PI / 2 : opt.rot;
+    /* 尾焰的"实际朝向"，独立于弹体 rot（3.44）。
+     * 弹体是刚体，转向必须立刻；但喷出去的火是空气里的东西，转不回来那么快。
+     * 两者分开存，转弯时火焰才会被甩成一道弯、而不是跟着贴图整体硬转一圈。
+     * 池对象：必须按发射方向复位，否则复用时会带着上一颗弹的残留角度开局。 */
+    this.trailA = Math.atan2(vy, vx);
     this.life = opt.life === undefined ? 5 : opt.life;
     this.ay = opt.ay || 0;          // 纵向加速度（抛石类弹幕用）
     this.pierce = !!opt.pierce;     // 穿透弹（激光）
@@ -88,6 +93,17 @@ class Bullet {
         this.vy = Math.sin(na) * sp;
         this.rot = na + Math.PI / 2;
       }
+    }
+
+    /* 尾焰朝向的低通跟随（3.44）：弹体一帧能转 5.2×dt≈0.087 rad，尾焰只肯
+     * 转它的一部分，于是转弯时两者夹角能拉到 0.6~0.9 rad——
+     * 火焰被"落在弯道内侧"，形状上就是一条向后甩的火舌，而不是贴在机尾的纸片。
+     * 系数 6 是手感值：再小火焰像断在半空，再大就跟弹体一起硬转了。 */
+    if (this.homing > 0) {
+      let td = Math.atan2(this.vy, this.vx) - this.trailA;
+      while (td > Math.PI) td -= Math.PI * 2;
+      while (td < -Math.PI) td += Math.PI * 2;
+      this.trailA += td * Math.min(1, dt * 6);
     }
 
     if (this.ay) this.vy += this.ay * dt;
@@ -167,6 +183,23 @@ class Bullet {
     ctx.globalCompositeOperation = 'lighter';
 
     if (this.kind === 'track') {
+      /* 尾焰要和弹体**分开转**（3.44）。以前整段火焰跟着 rot 刚性旋转，
+       * 追踪弹一拐弯就是"尾巴原地甩一圈"，一眼就假。
+       * 现在末端按 trailA（滞后朝向）落点：本地 (-len·sinδ, len·cosδ)，
+       * δ = 火焰与弹体的夹角。直线飞行时 δ=0，和以前一样笔直；
+       * 转弯时末端被拖到弯道内侧，中间用二次贝塞尔连起来——一道被甩弯的火舌。
+       * 长度自然乘了 cosδ：火焰甩到侧面时正投影本来就该变短。 */
+      const ta = this.trailA === undefined ? a : this.trailA;
+      let dlt = ta - a;
+      while (dlt > Math.PI) dlt -= Math.PI * 2;
+      while (dlt < -Math.PI) dlt += Math.PI * 2;
+      /* 三层各甩各的：最外那层是低速的余焰，被甩得最开；内芯是刚从喷口出来的
+       * 高速火焰，几乎还贴着弹体走。同一个 δ 三层各自乘 1.35 / 1.0 / 0.6，
+       * 转弯时火舌会"撕开"成扇形——这是它读起来像流体而不是像一块布的关键。
+       * 顺带：外层甩开时补一点长度，否则 cos 一收缩就只剩个短疙瘩。 */
+      const bendK = [1.35, 1.0, 0.6];
+      const growK = [1.30, 1.12, 1.0];
+      const sw = Math.abs(Math.sin(dlt));
       /* 尾焰三层：暗橙铺长度、亮橙做主体、近白短芯。长度按 life 做相位抖动——
        * 一条长度恒定的火焰看起来像贴在机身后面的纸片。
        * 长宽比按 46:9 取：短而宽的火焰读作"桃形光斑"，只有拉长才像在推进。 */
@@ -178,22 +211,33 @@ class Bullet {
         [44 * f, 7.2, 'rgba(255,165,64,0.42)'],
         [26 * f, 4.2, 'rgba(255,246,220,0.85)']
       ];
-      for (const [len, w, col] of flame) {
+      for (let i = 0; i < flame.length; i++) {
+        const [base, w, col] = flame[i];
+        const len = base * (1 + (growK[i] - 1) * sw);
+        const bd = clamp(dlt * bendK[i], -1.2, 1.2);
+        const ex = -len * Math.sin(bd), ey = len * Math.cos(bd);
         ctx.beginPath();
         ctx.moveTo(-w, 0);
-        ctx.quadraticCurveTo(-w * 0.5, len * 0.74, 0, len);
-        ctx.quadraticCurveTo(w * 0.5, len * 0.74, w, 0);
+        ctx.quadraticCurveTo(-w * 0.5 + ex * 0.16, ey * 0.74, ex, ey);
+        ctx.quadraticCurveTo(w * 0.5 + ex * 0.16, ey * 0.74, w, 0);
         ctx.closePath();
         ctx.fillStyle = col;
         ctx.fill();
       }
       // 尾端飘散的碎火：让"喷出来"这件事一直有东西在收尾，不至于一刀切在光晕边缘
+      // 碎火走同一条弯线（二次贝塞尔取点），不然火焰弯了珠子还在直线上飞
+      const outer = clamp(dlt * bendK[0], -1.2, 1.2);
+      const oLen = 62 * f * (1 + (growK[0] - 1) * sw);
+      const bx = -oLen * Math.sin(outer), by = oLen * Math.cos(outer);
       for (let i = 0; i < 3; i++) {
         const p = (this.life * 3.1 + i / 3) % 1;      // 0→1 循环
+        const t = 0.29 + p * 0.71;
+        const px = t * t * bx;
+        const py = by * (1.48 * t * (1 - t) + t * t);
         ctx.globalAlpha = (1 - p) * 0.55;
         ctx.fillStyle = 'rgba(255,150,60,1)';
         ctx.beginPath();
-        ctx.arc(Math.sin(p * 9 + i) * 5, 18 + p * 42 * f, 2.6 * (1 - p * 0.6), 0, Math.PI * 2);
+        ctx.arc(px + Math.sin(p * 9 + i) * 5, py, 2.6 * (1 - p * 0.6), 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha = 0.3;
@@ -480,7 +524,10 @@ class Player {
     this.orbitBoostT = 0;            // 超额吃 R 的加速剩余时间
     this.lasers = PLAYER.laserBombs; // 激光保险数量
     this.shield = null;              // 临时护盾 { hp, max, t, hitT }
-    this.tempWpn = null;             // 临时武器 { id:'track'|'wide', t, cd }
+    /* 临时武器是**一组**（3.47）：三把（追踪 / 宽头 / 雷电）各自独立计时、独立冷却，
+     * 吃到第二把不再顶掉第一把。以前这里是单个对象，玩家吃到宽头弹追踪弹就消失，
+     * 而这两件都是 35 秒的实验武器——"我明明刚捡的"是最伤手感的一种丢失。 */
+    this.tempWpns = [];              // [{ id:'track'|'wide'|'thunder', t, cd }]
     this.tempAlly = null;            // 临时僚机 { t, x, y, slotT }
     this.resetStage();
   }
@@ -701,12 +748,24 @@ class Player {
     game.onTempGain(this, 'shield');
   }
 
-  /** 吃 T / D：临时武器。重复吃同一把 → 只刷新时间 */
+  /** 吃 T / D / Z：临时武器。三把**可以同时在手**（3.47），
+   *  重复吃同一把 → 只刷新时间与冷却，不叠加、不新建第二条。 */
   gainTempWpn(game, id) {
     const C = TEMP[id];
-    const same = this.tempWpn && this.tempWpn.id === id;
-    this.tempWpn = { id, t: C.dur, cd: same ? this.tempWpn.cd : 0.1 };
+    const cur = this._tempWpnOf(id);
+    if (cur) {
+      cur.t = C.dur;
+      cur.cd = Math.min(cur.cd, 0.1);
+    } else {
+      this.tempWpns.push({ id, t: C.dur, cd: 0.1 });
+    }
     game.onTempGain(this, id);
+  }
+
+  /** 按 id 取当前在手的临时武器，没有就返回 null */
+  _tempWpnOf(id) {
+    for (const tw of this.tempWpns) if (tw.id === id) return tw;
+    return null;
   }
 
   /** 吃 A：临时僚机。已在场时再吃 → 刷新时间，并补一段无敌
@@ -731,18 +790,28 @@ class Player {
       if (sh.hitT > 0) sh.hitT -= dt;
       if (sh.jit > 0) sh.jit -= dt;      // 挡弹抖动的衰减（只影响绘制，不影响判定）
       if (sh.t <= 0 || sh.hp <= 0) {
+        /* 被打穿 ≠ 时间到（3.45）：只有"耐久没了但时间还在"才算打穿，
+         * 这时补一口血。时间到就正常消失，不给白送的血——
+         * 否则玩家会把护盾当成"35 秒后的回血包"，主动留着不打弹。 */
+        const broke = sh.hp <= 0 && sh.t > 0;
         this.shield = null;
-        game.onTempEnd(this, 'shield');
+        if (broke && TEMP.shield.breakHeal > 0) {
+          this.hp = Math.min(this.maxHp, this.hp + TEMP.shield.breakHeal);
+          game.onShieldBreak(this, TEMP.shield.breakHeal);
+        } else {
+          game.onTempEnd(this, 'shield');
+        }
       }
     }
 
-    // 临时武器：自动开火。canFire 在结算/死亡时为 false，这里跟着停，
-    // 否则结算页上还在喷弹幕
-    const tw = this.tempWpn;
-    if (tw) {
+    /* 临时武器：每把独立计时、独立冷却。canFire 在结算/死亡时为 false，这里跟着停，
+     * 否则结算页上还在喷弹幕。
+     * 倒序遍历 + splice：正序删元素会跳过下一个（三把同时在场时只掉一把）。 */
+    for (let i = this.tempWpns.length - 1; i >= 0; i--) {
+      const tw = this.tempWpns[i];
       tw.t -= dt;
       if (tw.t <= 0) {
-        this.tempWpn = null;
+        this.tempWpns.splice(i, 1);
         game.onTempEnd(this, tw.id);
       } else if (this.canFire) {
         tw.cd -= dt;
@@ -810,7 +879,9 @@ class Player {
     return C.cd;
   }
 
-  /** 临时僚机：只跟主槽，伤害 0.6、射速再压一档，不能盖过正式僚机 */
+  /** 临时僚机（3.45）：第二把满级主武器——火力 1.0 倍、等级跟随主槽、
+   *  射速只压 1.15 倍间隔。它不再"不能盖过正式僚机"：正牌 O 是永久的，
+   *  这一件只亮 35 秒，限时本身就是它的平衡。 */
   _updateTempAlly(dt, game, ta) {
     const C = TEMP.ally;
     const k = Math.min(1, 7.5 * dt);
@@ -822,7 +893,7 @@ class Player {
     ta.slotT -= dt;
     if (ta.slotT > 0 || !this.canFire) return;
     this.fireFrom(game, ta.x, ta.y - 18, C.mul, Math.min(C.powMax, this.lv[0] || PLAYER.startPower), wi);
-    ta.slotT = WEAPONS[wi].cd * 1.6;
+    ta.slotT = WEAPONS[wi].cd * 1.15;
   }
 
   fire(game) {
@@ -1218,7 +1289,7 @@ class Player {
     this.bombs = PLAYER.bombs;
     this.lasers = 0;
     this.shield = null;
-    this.tempWpn = null;
+    this.tempWpns = [];
     this.tempAlly = null;
   }
 
@@ -1269,7 +1340,7 @@ class Player {
     if (this.lives > 0) game.dropLoadout(this);
     // 临时增益不跟到新命：护盾/临时武器/临时僚机是"这一段战斗的战术优势"
     this.shield = null;
-    this.tempWpn = null;
+    this.tempWpns = [];
     this.tempAlly = null;
     this.options = [];
     this.orbits = [];
@@ -2560,6 +2631,9 @@ class Boss {
     this.fireT = 1.4;
     this.supportT = 6.0;     // 入场后 6 秒第一次呼叫支援
     this.ang = 0;
+    this.spiralN = 0;        // boss1 终段螺旋的轮次计数（每 6 轮插一次瞄准齐射）
+    this.lastP = null;       // 上一轮的玩家位置，boss1 终段用来估速度做预判
+    this.lastPT = 0;
     this.lungeX = 0;        // 钳击的横向偏移（叠加在巡游基座上）
     this.lungeTarget = 0;
     this.lungeHold = 0;     // 冲到位置后保持的时间
@@ -2640,9 +2714,20 @@ class Boss {
     this.finalPhase = false;
     this.mode = 'idle';          // idle | aim | dive | retreat | return
     this.modeT = 0;
-    // 出场无敌：整段入场 + 到位后 0.6 秒都打不到
-    this.invuln = true;
+    /* 出场保护分两种（3.46，见 LEVELS[].bossEntry）：
+     *   'invuln'（默认）入场全程 + 到位后 0.6 秒打不动，但子弹会**弹开**
+     *            ——以前是整块跳过判定，子弹从舰体中间穿过去不留痕迹，
+     *            玩家只会觉得"打了个寂寞 / BOSS 是张会动的贴图"。
+     *            现在照常判定命中、消耗子弹、溅火花、护罩荡开一圈涟漪，
+     *            只是不结算伤害。交互在，代价也要说清楚。
+     *   'open'   前两关用：出场就能打（此时玩家火力线还没成型，空等 3 秒
+     *            只会让第一场 BOSS 战变得很空）。
+     */
+    this.entryMode = stage.bossEntry === 'open' ? 'open' : 'invuln';
+    this.invuln = this.entryMode !== 'open';
     this.guardT = 3.4;
+    // 护罩被弹开的涟漪（绘制用，最多留几条）
+    this.barrierHits = [];
     this.diveVY = 0;
     this.diveTX = VIEW.w / 2;
 
@@ -2680,9 +2765,33 @@ class Boss {
     this.jitterT = this.jitterDur;
   }
 
+  /** 无敌期被子弹打中：在命中点留一圈涟漪。
+   *  只留最近 6 条——密集弹幕下不封顶就是一张越画越慢的网。 */
+  barrierHit(x, y) {
+    if (this.barrierHits.length >= 6) this.barrierHits.shift();
+    this.barrierHits.push({ x: x, y: y, t: 0.3 });
+  }
+
+  /* 无敌期的挡弹判定：走**画出来的那层膜**，而不是舰体轮廓。
+   * 用舰体轮廓会让子弹穿过膜、在膜里面才消失，看起来像"打穿了但没炸"；
+   * 只有停在膜上才对得上眼睛看到的东西。半径常量必须与 draw() 里一致。 */
+  barrierHitTest(x, y, r) {
+    const rx = this.w * 0.46 + r, ry = this.h * 0.46 + r;
+    const dx = (x - this.x) / rx, dy = (y - this.y) / ry;
+    return dx * dx + dy * dy <= 1;
+  }
+
   update(dt, game) {
     this.t += dt;
     if (this.flash > 0) this.flash -= dt;
+
+    /* 护罩涟漪：每条独立计时，从命中点向外扩一圈就消失。
+     * 它只活 0.3 秒，必须自己衰减 —— 挂在 flash 上会被 0.06 秒的命中闪盖掉。 */
+    for (let i = this.barrierHits.length - 1; i >= 0; i--) {
+      const h = this.barrierHits[i];
+      h.t -= dt;
+      if (h.t <= 0) this.barrierHits.splice(i, 1);
+    }
 
     // 机身震颤：平方衰减，前几帧最猛，0.36 秒内收干净
     if (this.jitterT > 0) {
@@ -2717,8 +2826,8 @@ class Boss {
         this.enterT = this.t;
         this.y = 232;
         this.x = VIEW.w / 2;
-        this.guardT = 0.6;      // 到位后再给 0.6 秒缓冲
-        this.invuln = this.guardT > 0;
+        this.guardT = this.entryMode === 'open' ? 0 : 0.6;   // 到位后再给 0.6 秒缓冲
+        this.invuln = this.entryMode !== 'open';
       }
       return;
     }
@@ -3502,7 +3611,9 @@ class Boss {
     ctx.shadowColor = 'rgba(0,0,0,0.85)';
     ctx.shadowBlur = 34;
     ctx.shadowOffsetY = 6;
-    Assets.draw(ctx, this.sprite, this.x, this.y, 1, this.invuln ? 0.4 : 1);
+    /* 无敌期不再把机体画成半透明（3.46）：那读起来像"贴图没加载完"，
+     * 而且与"子弹会弹开"这件事毫无关系。现在由护罩负责解释为什么打不动。 */
+    Assets.draw(ctx, this.sprite, this.x, this.y, 1, 1);
     ctx.restore();
 
     this._drawParts(ctx);
@@ -3514,6 +3625,54 @@ class Boss {
       Assets.draw(ctx, this.sprite, this.x, this.y, 1, 0.5);
       ctx.restore();
     }
+    /* 入场护罩（3.46）：一圈能量膜 + 命中涟漪。
+     * 它的职责只有一个：让"打不动"这件事有可见的原因。
+     * 用叠加混合而不是普通描边，才能在一片弹幕里仍然读得出来。 */
+    if (this.invuln && this.y > -this.h * 0.5) {
+      const rx = this.w * 0.46, ry = this.h * 0.46;
+      const pulse = 0.5 + Math.sin(this.t * 4.6) * 0.5;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      // 一层极淡的填充：让整块机体"在膜里面"，而不是被一圈线框住
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.globalAlpha = 0.05 + pulse * 0.05;
+      ctx.fillStyle = '#8fe8ff';
+      ctx.fill();
+      ctx.globalAlpha = 0.16 + pulse * 0.10;
+      ctx.strokeStyle = '#9fe8ff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      /* 外圈虚线转起来：静止的同心圆读作"光环"，只有带缺口且在动的东西
+       * 才会被读成一层能量场。lineDashOffset 跟着 t 走，帧间连续。 */
+      ctx.globalAlpha = 0.34 + pulse * 0.20;
+      ctx.strokeStyle = '#c8f2ff';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([15, 13]);
+      ctx.lineDashOffset = -this.t * 48;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, rx * 1.045, ry * 1.045, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 命中涟漪：一圈向外扩的环 + 命中点亮一下。
+      // 只有环会读成"一个气泡"，加一个迅速缩掉的亮核才像"弹开"。
+      for (const h of this.barrierHits) {
+        const k = h.t / 0.3;                     // 1 → 0
+        ctx.globalAlpha = k * 0.85;
+        ctx.strokeStyle = '#e8fbff';
+        ctx.lineWidth = 0.8 + k * 2.2;
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, (1 - k) * 13 + 2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = k * k * 0.9;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, 1 + k * 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
     // 阶段护盾提示
     if (this.phase === 2) {
       ctx.save();

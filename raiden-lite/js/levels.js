@@ -224,12 +224,37 @@ const BOSS_PATTERNS = {
       SFX.enemyShoot();
       return 0.92;
     }
-    b.ang += 0.42;
+    /* 终段（3.46）：原来只有一圈 205 速的三臂螺旋，转速慢、只有一种弹，
+     * 玩家守在最底下几乎不用横移就能躲完——第一关的收尾反而比第二阶段松。
+     * 现在螺旋提速到 235，并且每 6 轮（≈0.86 秒）插一次朝玩家的五连快弹：
+     * 前者负责"位置一直在变"，后者负责"必须横移"。
+     * 齐射带 0.35 秒预判（用上一轮的位置差估玩家速度）——不带预判的瞄准弹
+     * 对一直横移的玩家等于不存在；带太多又会变成"贴脸打死"，
+     * 0.35 秒刚好惩罚直线跑，急停或反向就能甩开。
+     * 仍然只有两种弹、两种颜色，第一关该有的可读性不丢。 */
+    b.ang += 0.44;
+    b.spiralN++;
     for (let i = 0; i < 3; i++) {
       const a = b.ang + i * (Math.PI * 2 / 3);
-      game.spawnEnemyBullet(b.x, b.y + 40, Math.cos(a) * 205, Math.sin(a) * 205,
+      game.spawnEnemyBullet(b.x, b.y + 40, Math.cos(a) * 235, Math.sin(a) * 235,
         { kind: 'enemyAlt' });
     }
+    if (b.spiralN % 6 === 0) {
+      let tx = p.x, ty = p.y;
+      if (b.lastP) {
+        const dtp = Math.max(0.05, b.t - b.lastPT);
+        tx += clamp((p.x - b.lastP.x) / dtp, -260, 260) * 0.35;
+        ty += clamp((p.y - b.lastP.y) / dtp, -260, 260) * 0.35;
+      }
+      const a0 = Math.atan2(ty - b.y, tx - b.x);
+      for (let i = -2; i <= 2; i++) {
+        const a = a0 + i * 0.13;
+        game.spawnEnemyBullet(b.x, b.y + 56, Math.cos(a) * 285, Math.sin(a) * 285);
+      }
+      SFX.enemyShoot();
+    }
+    b.lastP = { x: p.x, y: p.y };
+    b.lastPT = b.t;
     return 0.16;
   },
 
