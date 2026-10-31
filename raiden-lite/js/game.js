@@ -1207,6 +1207,21 @@ class Game {
     SFX.explode(true);
     this.score += 800;
     this.spawnPickup(boss.x + part.dx, boss.y + part.dy + 24, 'P');
+    /* 拆炮台连带撕开舰体（3.49）：炮台有自己的血条，打它一点本体都伤不到，
+     * 于是"精准拆炮台"在血量上纯亏——见 PLAYER.bossPartKillRatio。
+     * 走 raw 绕过轮转盾：这不是"打到本体"，是炮塔炸开时把舰体撕了一道口子，
+     * 被弱点轮转削到 28% 会让玩家觉得炮台白拆。
+     * 血条掉一截必须有说法，否则玩家只会看到血条莫名少了一段：
+     * 从炮台位置向上喷一圈暖色碎光，读作"从这里裂开了"。 */
+    if (!boss.dead) {
+      boss.hit(boss.maxHp * PLAYER.bossPartKillRatio, this, { raw: true });
+      for (let i = 0; i < 10; i++) {
+        this.addParticle(boss.x + part.dx, boss.y + part.dy, {
+          vx: rand(-70, 70), vy: rand(-130, -40), life: 0.42, r: 4,
+          color: i % 3 ? '#ffb066' : '#ffffff', drag: 0.9
+        });
+      }
+    }
   }
 
   /** 浮游炮被打掉 */

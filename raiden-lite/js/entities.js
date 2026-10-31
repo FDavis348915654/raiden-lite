@@ -3250,11 +3250,16 @@ class Boss {
     return n;
   }
 
-  hit(dmg, game) {
+  /* opt.raw（3.49）：跳过护盾轮转的减伤，给"拆炮台连带掉血"用。
+   * 那不是一次"打到本体"的攻击，而是炮塔炸开把舰体撕了一道口子。
+   * 眼下带部件的 BOSS（boss6 / boss7）都还没有轮转盾（只有 boss3 有），
+   * 所以这个 flag 目前是空跑——但以后谁给它们加上 shield，拆炮台就会
+   * 静默变成只掉 28%，一个参数、没有任何报错。规则先写清楚。 */
+  hit(dmg, game, opt) {
     if (this.dead) return;
 
     // 护盾轮转：只有弱点那半圈能打满伤害，其余方向大幅减免
-    if (this.shieldCfg && game && game.player) {
+    if (!(opt && opt.raw) && this.shieldCfg && game && game.player) {
       const a = Math.atan2(game.player.y - this.y, game.player.x - this.x);
       let quad = Math.round(a / (Math.PI / 2));
       quad = ((quad % 4) + 4) % 4;

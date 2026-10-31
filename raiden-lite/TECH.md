@@ -277,6 +277,8 @@ zip -qr raiden-lite-<V>.zip raiden-lite -x "*/__pycache__/*" "*.png.bak"
 
 碰撞全部是**圆-圆距离平方比较**（`dist2`，不开方）+ BOSS 的多圆近似；只有 BOSS 本体用矩形。判定与绘制**必须同步**：`_drawHitboxes()` 是调试层，约定是"每一条真实判定都要画出来"，改了判定不更新它，这个开关就会骗人。
 
+BOSS 的可破坏部件（`BOSS_PARTS`）与本体是**两条独立血条**：子弹命中先判部件圆、命中即 `continue`，所以打炮台一点本体伤害都落不到；3.49 起在 `onBossPartDestroyed()` 里补一笔本体伤害（`bossPartKillRatio`），并走 `boss.hit(..., { raw: true })` 跳过护盾轮转的 28% 减伤——它是"炮塔爆炸撕开舰体"，不是一次命中。同一条回调也被保险（`_bombBoom`）复用，所以一颗雷清掉两门会同时拿到 16% 与 `bombBossDmg`。
+
 BOSS 出场无敌期（`boss.invuln`）**不是关掉碰撞**：`_collide` 里它走独立分支——照常调 `_bossHits()` 判命中、消耗子弹、`boss.barrierHit()` 记一圈涟漪、溅冷色火花，只跳过扣血。这样"打不动"和"打不到"在观感上是两件事，后者会被玩家当成 bug。分支写成 `if (invuln) {...} else if (boss) {...}` 而不是 `if (invuln) continue`：那条 `continue` 会连后面打小怪的循环一起跳过（第 7 关 BOSS 退场召唤期间援军就永远打不掉）。
 
 ---
