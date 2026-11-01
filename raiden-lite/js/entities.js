@@ -2975,6 +2975,11 @@ class Boss {
     this.summonFire = tr.summonFire || 0;
     this.summoned = false;
     this.retreatT = 0;
+    /* 退场时长上限（3.64）：默认 15 秒是"援军打不完也要回来"的兜底。
+     * 召唤型/分裂型 BOSS 的援军血量一旦提上去，15 秒就不够用了——清不完
+     * 只会触发兜底：BOSS 强行回场，分身还挂在屏幕上，玩家同时挨两套弹幕。
+     * 所以由 BOSS_TRAITS 逐关给（boss7/boss8 各 24 秒），默认值保持不变。 */
+    this.retreatMax = tr.retreatMax || 15;
     this.finalPhase = false;
     this.mode = 'idle';          // idle | aim | dive | retreat | return
     this.modeT = 0;
@@ -3468,8 +3473,8 @@ class Boss {
       this.y = Math.max(-260, this.y - 330 * dt);
       if (this.y <= -260) {
         this.x = VIEW.w / 2;
-        // 援军清完就回归；万一卡住（援军飞出屏幕等），15 秒后强制回归
-        if (!game.hasSummonedMinions() || this.retreatT > 15) {
+        // 援军清完就回归；万一卡住（援军飞出屏幕等），到 retreatMax 强制回归
+        if (!game.hasSummonedMinions() || this.retreatT > this.retreatMax) {
           this.mode = 'return';
           this.modeT = 0.9;
           this.invuln = false;
