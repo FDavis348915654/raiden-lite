@@ -197,7 +197,16 @@ const BOSS_TRAITS = {
   /* 激光 + 镜像武器 */
   boss5: { laser: { cd: 8.0, charge: 1.1, lock: 1.0, fire: 1.5, width: 38, track: 0.50 }, mirror: true },
   boss6: { dive: true, diveCd: 8.5, laser: { cd: 9.5, charge: 1.0, lock: 0.8, fire: 1.3, width: 32, track: 0.58 } },
-  boss7: { summonAt: 0.55, summonCount: 3, laser: { cd: 9.5, charge: 1.2, lock: 0.9, fire: 1.4, width: 34, track: 0.55 } },
+  /* boss7 召唤：血量到 55% 退场叫 3 只小 BOSS。
+   * summonHp / summonFire 是**这一场专属**的覆盖值（3.62）：原来写死 55 血、射速 1.7，
+   * 三只加起来还不够玩家一轮齐射——召唤段一两秒就结束，玩家只看到 BOSS 闪一下又回来，
+   * 这段机制等于不存在。现在给到 320 血（普通小 BOSS 的八成）和 1.0 秒一轮，
+   * 但**不动 ENEMY_DEFS.miniboss 本身**：那是第 3~5 关整波巡逻小 BOSS 的数值，
+   * 一起改会连带把前面几关的节奏重做一遍。
+   * 320 是量出来的，不是拍的：满配四槽集火要 10 秒，而 BOSS 退场超过 15 秒会被
+   * `retreatT > 15` 强制拉回场——再厚就会变成"BOSS 回来了援军还在"。 */
+  boss7: { summonAt: 0.55, summonCount: 3, summonHp: 320, summonFire: 1.0,
+           laser: { cd: 9.5, charge: 1.2, lock: 0.9, fire: 1.4, width: 34, track: 0.55 } },
   /* 分裂 + 双栅栏 + 中央弹幕束 */
   boss8: { splitAt: 0.42, splitCount: 2, fence: true, center: true },
   /* 最终 BOSS：弹幕墙 + 引力场 + 激光 */

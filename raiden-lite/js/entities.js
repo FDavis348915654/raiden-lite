@@ -1764,7 +1764,12 @@ class Enemy {
     this.baseX = x;
     this.t = 0;
     this.phase = Math.random() * Math.PI * 2;
-    this.fireT = def.fire ? rand(0.7, def.fire) : 999;
+    /* 射速可被**单只覆盖**（opt.fire，3.62）：BOSS 召唤的小 BOSS 要和巡逻的同名机型
+     * 打不同的节奏，改 ENEMY_DEFS.miniboss.fire 会把第 3~5 关的整波小 BOSS 一起改掉。
+     * 存成实例字段而不是去拼 def 副本：下面 9 处开火分支都读 this.fireCd，
+     * 只改 def 的话这些分支还读着旧值，表现为"配了没生效"。 */
+    this.fireCd = opt.fire || def.fire || 0;
+    this.fireT = this.fireCd ? rand(0.7, this.fireCd) : 999;
     this.locked = false;
     this.vx = 0;
     this.vy = 0;
@@ -1833,8 +1838,8 @@ class Enemy {
      * （entryDone 且 entryBuf 归零）——否则从底部升起的单位会把护盾全烧在
      * 屏幕外那段爬升里，玩家看到的是"一冒头盾就没了"。
      * 池对象必须逐项复位：漏一个就会出现"这一只没配置护盾、却顶着上一只的盾"。 */
-    /* BOSS 召唤的援军一律不给盾：它们是"量"不是"质"，每只 55 血的小 BOSS
-     * 套一层 180 血的壳，会让整段召唤节奏变成一堵墙。 */
+    /* BOSS 召唤的援军一律不给盾：它们是"量"不是"质"，
+     * 每只都套一层 180 血的壳，会让整段召唤节奏变成一堵墙。 */
     const es = opt.summoned ? null : ENEMY_SHIELD[this.kind];
     const smul = opt.shieldMul === undefined ? 1 : opt.shieldMul;
     this.shieldMax = es ? Math.round(es.hp * smul) : 0;
@@ -1958,7 +1963,7 @@ class Enemy {
         this.x = this.baseX + Math.sin(this.t * 1.1 + this.phase) * 14;
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.75) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'aim');
         }
         break;
@@ -1970,7 +1975,7 @@ class Enemy {
         this.x = this.baseX + Math.sin(this.t * 0.7 + this.phase) * 10;
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.70) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'snipe');
         }
         break;
@@ -1980,7 +1985,7 @@ class Enemy {
         this.x = this.baseX + Math.sin(this.t * 0.8 + this.phase) * 26;
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.7) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'fan3');
         }
         break;
@@ -2023,7 +2028,7 @@ class Enemy {
         }
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game) && this.hoverT < 10) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'ring');
         }
         break;
@@ -2135,7 +2140,7 @@ class Enemy {
         this.x = this.baseX + Math.sin(this.t * 0.5 + this.phase) * 22;
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game) && this.y < VIEW.h * 0.8) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'aim2');
         }
         break;
@@ -2154,7 +2159,7 @@ class Enemy {
           this.x += clamp(p.x - this.x, -150 * dt, 150 * dt) * 1.3;
           this.fireT -= dt;
           if (this.fireT <= 0 && this.inPlay(game)) {
-            this.fireT = this.def.fire;
+            this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
             this.shoot(game, 'aim');
           }
         }
@@ -2172,7 +2177,7 @@ class Enemy {
         this.x = this.baseX + Math.sin(this.t * 1.5 + this.phase) * 26;
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game)) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'aim');
         }
         break;
@@ -2211,7 +2216,7 @@ class Enemy {
           this.x = this.centerX + Math.sin(mt * 0.62) * this.sweep;
           this.fireT -= dt;
           if (this.fireT <= 0 && this.inPlay(game) && p.alive) {
-            this.fireT = this.def.fire;
+            this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
             this._mbFire(game);
           }
         }
@@ -2352,7 +2357,7 @@ class Enemy {
       if (p && p.alive) {
         this.fireT -= dt;
         if (this.fireT <= 0 && this.inPlay(game)) {
-          this.fireT = this.def.fire;
+          this.fireT = this.fireCd || 999;   // 没配射速的机型不开火（和之前的 undefined 等效，但不能留 0：0 会被判成"每帧都能开火"）
           this.shoot(game, 'aim');
         }
       }
@@ -2963,6 +2968,11 @@ class Boss {
     this.diveT = this.diveCd;
     this.summonAt = tr.summonAt || 0;
     this.summonCount = tr.summonCount || 0;
+    /* 召唤援军的血量与射速（0 = 没配，由 summonBossMinions 用兜底值）。
+     * 放在 trait 里而不是 ENEMY_DEFS：同一只 miniboss 在第 3~5 关是常规波次，
+     * 在第 7 关是"BOSS 退场期间的全部压力"，两者该有不同强度。 */
+    this.summonHp = tr.summonHp || 0;
+    this.summonFire = tr.summonFire || 0;
     this.summoned = false;
     this.retreatT = 0;
     this.finalPhase = false;

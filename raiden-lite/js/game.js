@@ -1325,12 +1325,16 @@ class Game {
   /** 召唤型 BOSS 退场，放出援军 */
   summonBossMinions(boss, count) {
     const n = count || 3;
+    /* 强度由 BOSS_TRAITS 给（3.62）。兜底 55 血是没配 trait 时的旧值——
+     * 它只适合"召唤只是一闪而过"的早期关卡，第 7 关已经显式配成标准小 BOSS。 */
+    const hp = boss.summonHp > 0 ? boss.summonHp : 55;
+    const fire = boss.summonFire > 0 ? boss.summonFire : 0;
     for (let i = 0; i < n; i++) {
       const e = this.enemies.find(o => !o.active);
       if (!e) break;
       const x = clamp(VIEW.w / 2 + (i - (n - 1) / 2) * 134, 76, VIEW.w - 76);
       e.init('miniboss', x, 208, {
-        hp: 55, summoned: true,
+        hp, fire, summoned: true,
         centerX: x, sweep: 34          // 各自在出生点小幅摆动，不会挤到中间叠一起
       });
       this.explode(x, 208, 0.9, '#ffd166', 14);
@@ -1630,8 +1634,10 @@ class Game {
       friendly: false,
       kind: opt.kind || 'enemy',
       // 判定半径统一按 ENEMY_BULLET_HIT_K 收缩，贴图尺寸不动（见 config.js 注释）。
-      // 下限 3.5 是为了不让最小的弹变成"完全打不中"。
-      r: Math.max(3.5, (opt.r || 6) * ENEMY_BULLET_HIT_K),
+      // 下限随系数同步缩（3.61：3.5 → 1.75）。它原来是为了不让最小的弹"完全打不中"，
+      // 但写成绝对值就会把系数改小的效果吃掉一半（r6 在 0.36 下本该是 2.16，
+      // 被 3.5 抬回去就只缩到 0.49 倍，看着像"改了没效果"）。
+      r: Math.max(1.75, (opt.r || 6) * ENEMY_BULLET_HIT_K),
       ay: opt.ay || 0,
       // 伤害：0 = 未指定，命中时按判定半径回落到 PLAYER.bulletDmg / bulletDmgBig。
       // 需要"这种弹比别人疼"（狙击弹）时才显式传，别在这里定默认值，
@@ -3143,10 +3149,11 @@ class Game {
         b.active = false;
         if (this.god) continue;
         // 伤害优先级：弹自己带 dmg 就用它（狙击弹 46），否则按判定半径分档——
-        // b.r 是已经乘过 ENEMY_BULLET_HIT_K 的判定半径：视半径 14 的大弹算下来 ≈10，
-        // 所以用 9 当"大弹"门槛，小/中弹（4.3 / 7.2）统一按普通弹算
+        // 门槛写成「视觉半径 × 系数」而不是一个判定值（3.61）：原来直接写 9，
+        // 那个数是按 0.72 反推出来的；系数一改到 0.36，所有弹都在 5 以下，
+        // 大弹的 34 伤害就静默退化成 26，且不报错。现在等价于"视半径 ≥ 12.5 算大弹"。
         p.hit(this, b.dmg > 0 ? b.dmg
-          : (b.r >= 9 ? PLAYER.bulletDmgBig : PLAYER.bulletDmg));
+          : (b.r >= 12.5 * ENEMY_BULLET_HIT_K ? PLAYER.bulletDmgBig : PLAYER.bulletDmg));
         if (!p.alive) return;
       }
     }
