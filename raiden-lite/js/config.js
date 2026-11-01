@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.53.0';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.57.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -714,8 +714,10 @@ const ENEMY_DEFS = {
   mine:      { sprite: 'e_mine',      hp: 12,  speed: 42,  score: 180, r: 0.68, ai: 'drift',  deathBurst: 12 },
   formation: { sprite: 'e_formation', hp: 10,  speed: 105, score: 180, r: 0.64, ai: 'straight' },
   torpedo:   { sprite: 'e_torpedo',   hp: 7,  speed: 250, score: 240, r: 0.58, ai: 'straight' },
+  /* diveRest：一次俯冲收势后到下一次蓄力之间的空档（3.57 起不设次数上限，
+   * 只要玩家还在 diveR 内就继续扑，逼人换位）。调大 = 追得松，调小 = 贴着咬。 */
   eel:       { sprite: 'e_eel',       hp: 34,  speed: 74,  score: 480, r: 0.58, ai: 'worm',
-               diveR: 150, diveSpeed: 430 },
+               diveR: 150, diveSpeed: 430, diveRest: 1.0 },
   jelly:     { sprite: 'e_jelly',     hp: 38,  speed: 48,  score: 420, r: 0.64, ai: 'hover',   fire: 3.1 },
   drone:     { sprite: 'e_drone',     hp: 7,  speed: 135, score: 140, r: 0.58, ai: 'chase' },
   shield:    { sprite: 'e_shield',    hp: 38,  speed: 55,  score: 600, r: 0.68, ai: 'tank' },
@@ -730,6 +732,13 @@ const ENEMY_DEFS = {
                deathBurst: 16, scale: 1.32 },
   // 回旋机：落到底部调头向上，边爬升边追着玩家打
   looper:    { sprite: 'e_fighter',   hp: 13,  speed: 108, score: 300, r: 0.64, ai: 'looper',   fire: 1.1 },
+  /* 巡航机（3.54）：走"双 U"路线——压到底部掉头爬回上半屏，再掉头压下来。
+   * 存在的理由不是难躲，而是**给第二次机会**：hp 110（三槽满级也要一秒多），
+   * 一轮火力没打死时它会绕回来，而不是直接从底边消失。
+   * 只在向下压的两段开火、向上拉起时沉默——玩家能读出"它冲下来才危险"，
+   * 而不是整段时间里都有一束来源不明的弹。 */
+  patrol:    { sprite: 'e_bomber',    hp: 320, speed: 130, score: 900, r: 0.68, ai: 'patrol',
+               fire: 2.4, scale: 1.25 },
   // 潜伏者：从屏幕底部升起，出现前底部会有警示
   riser:     { sprite: 'e_diver',     hp: 11,  speed: 132, score: 260, r: 0.60, ai: 'riser',    fire: 1.4 },
   // 中型机：底部升起 → 顶部巡游 → 三向散射，带独立血条
@@ -1179,7 +1188,7 @@ const LEVELS = [
     bossName: '虚空之主',
     bossHp: 7500,
     bossRate: 0.93,
-    hint: '自杀机 · 偏折机',
+    hint: '自杀机 · 偏折机 · 巡航机',
     // 虚空王座：几乎没有重量，飘得最慢；环绕机从底部浮到王座边缘再落回来
     supply: [
       { at: 6,  kind: 'P', from: 'top', speed: 54, sway: 38 },
@@ -1199,6 +1208,10 @@ const LEVELS = [
       { at: 1.5,  kind: 'kamikaze', n: 5, form: 'line',    speed: 160, gap: 0.24 },
       { at: 5.0,  kind: 'mirror',   n: 5, form: 'sides',   speed: 100, gap: 0.30 },
       { at: 8.5,  kind: 'flame',    n: 5, form: 'arc',     speed: 100, gap: 0.25 },
+      /* 巡航机首秀：放在 deflect 之前，让玩家先看懂这条"双 U"路线，
+       * 再进入"正面打不动"的守门段——两件事叠在同一个时间点会互相盖住。
+       * 两架、反向绕、隔 1.8 秒入场：路线不同向，一眼就能看出它不是整队平移。 */
+      { at: 10.2, kind: 'patrol',   n: 2, uo: true, gap: 1.8 },
       { at: 12.0, kind: 'deflect',  n: 2, form: 'line',    speed: 48,  gap: 0.6 },
       { at: 15.5, kind: 'kamikaze', n: 7, form: 'wave',    speed: 168, gap: 0.20 },
       { at: 19.0, kind: 'heavy',    n: 2, form: 'line',    speed: 48,  gap: 1.0 },
@@ -1207,6 +1220,10 @@ const LEVELS = [
       { at: 26.0, kind: 'deflect',  n: 3, form: 'line',    speed: 50,  gap: 0.6 },
       { at: 29.5, kind: 'kamikaze', n: 5, side: 'right', gap: 0.13 },   // 从右侧切入后直扑机身
       { at: 33.0, kind: 'flame',    n: 6, form: 'vee',     speed: 104, gap: 0.22 },
+      /* 第二次：接在 flame 的 V 字之后，和 heavy 的钳形错开——
+       * 这时玩家火力线已经满，两架 110 血的巡航机正好是"技能检验"，
+       * 而不是开场那种"血厚到只能绕"的挫败 */
+      { at: 34.6, kind: 'patrol',   n: 2, uo: true, gap: 1.6 },
       { at: 36.5, kind: 'heavy',    n: 3, form: 'pincer',  speed: 52,  gap: 0.9 },
       { at: 40.0, kind: 'kamikaze', n: 6, form: 'diamond', speed: 174, gap: 0.16 },
       { at: 42.0, kind: 'miniboss', n: 1, form: 'line',    speed: 58,  gap: 0.28, hp: 660, lane: 0.18 },
@@ -1311,6 +1328,9 @@ const LEVELS = [
       { at: 29.5, kind: 'drone',    n: 11, form: 'diamond', speed: 162, gap: 0.06 },
       { at: 33.0, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
       { at: 36.5, kind: 'sniper',   n: 3,  side: 'right',  gap: 0.7 },   // 侧向滑入后悬停蓄力
+      /* 终局回收：三架反向绕，卡在本关后半段唯一一段"全是从上面压下来"的编排之前，
+       * 让屏幕上出现"往返回旋"的第三条运动线（前有自机弹幕、侧面有蜂群、这里有环线） */
+      { at: 38.2, kind: 'patrol',   n: 3,  uo: true, gap: 1.5 },
       { at: 40.0, kind: 'kamikaze', n: 7,  form: 'diamond', speed: 178, gap: 0.14 },
       { at: 43.5, kind: 'eel',      n: 7,  form: 'cross',   speed: 104, gap: 0.24 },
       // 中段小 BOSS：和前八关一样"波次过半来一波"，双蛇仍然独占最后 10 秒

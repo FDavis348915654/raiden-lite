@@ -3,6 +3,11 @@
  * 注意：浏览器要求用户交互后才能播放，首次点击/按键时 init()
  * ============================================================ */
 
+/* 总线音量。3.57 从 0.22 提到 0.30（约 +2.7dB）：手机上外放时原先偏轻，
+ * 尤其密集弹幕下的射击声几乎听不见。只写一份——init 与 setEnabled 各写一遍
+ * 曾经出现过"初始化按旧值、切开关按新值"的不一致。 */
+const SFX_VOL = 0.30;
+
 const SFX = {
   ctx: null,
   master: null,
@@ -19,7 +24,7 @@ const SFX = {
     this.ctx = new AC();
     this.master = this.ctx.createGain();
     // 用户可能在 init 之前就把声音关了（HUD 按钮），这里要按当前开关状态来
-    this.master.gain.value = this.enabled ? 0.22 : 0;
+    this.master.gain.value = this.enabled ? SFX_VOL : 0;
     this.master.connect(this.ctx.destination);
   },
 
@@ -28,7 +33,7 @@ const SFX = {
     this.enabled = !!on;
     if (this.enabled) this.init();          // 没初始化过就顺手建上下文（必须有用户手势）
     if (this.master && this.ctx) {
-      this.master.gain.setTargetAtTime(this.enabled ? 0.22 : 0, this.ctx.currentTime, 0.02);
+      this.master.gain.setTargetAtTime(this.enabled ? SFX_VOL : 0, this.ctx.currentTime, 0.02);
     }
   },
 

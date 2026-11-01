@@ -24,6 +24,29 @@ function spawnFormation(game, w) {
   const gap = w.gap || 0.16;
   const baseY = -48;
 
+  // 双 U 巡航（3.54）：每架一条独立的环形路线，左右交替着绕，
+  // 屏幕上就同时有"向左右各绕一圈"的两三架，而不是一队同步平移。
+  // 路线横向要吃掉 2R（默认 144px），所以靠边的自动改成向内绕——
+  // 否则后半圈甩出屏幕，玩家看到的是"它从右边消失、又从右边钻回来"。
+  if (w.uo) {
+    /* 数量直接用 w.n，不吃 density：一架要在屏幕上绕 17 秒，
+     * 按密度放大（后期 ×2.4）会变成同屏四五架同时走环线，
+     * 既挤掉了别的波次，也让"这一架我还没打完"这件事失去焦点。 */
+    const cap = w.max || 3;
+    const cnt = Math.min(cap, Math.max(1, w.n || 1));
+    const R = w.pathR || 72;
+    const gap = w.gap || 1.6;
+    for (let i = 0; i < cnt; i++) {
+      const t = cnt === 1 ? 0.5 : i / (cnt - 1);
+      const x = 92 + t * (VIEW.w - 184);
+      let d = i % 2 ? 'left' : 'right';
+      if (d === 'right' && x + 2 * R > VIEW.w - 26) d = 'left';
+      if (d === 'left' && x - 2 * R < 26) d = 'right';
+      game.queueEnemy(Object.assign({}, w, { pathDir: d, pathR: R }), x, -70, i * gap, t);
+    }
+    return;
+  }
+
   // 对角穿越：从一侧下角斜穿到另一侧上角，整条斜线横跨屏幕。
   // 起点贴着屏幕底边（y ≈ H-24），所以玩家会看到它们从下方角落"窜"上来。
   if (w.diag) {

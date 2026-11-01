@@ -11,6 +11,11 @@ class Bullet {
     opt = opt || {};
     this.x = x;
     this.y = y;
+    /* 上一帧位置（3.55）：给"跨过一层膜"的判定用。
+     * 只靠当前位置判不出"是从外面进来的"还是"早就在里面"——
+     * 护盾挡弹必须认前者，否则从缺口穿进去的子弹会被后面某一帧补判成命中盾。 */
+    this.px = x;
+    this.py = y;
     this.vx = vx;
     this.vy = vy;
     this.friendly = !!opt.friendly;
@@ -46,6 +51,8 @@ class Bullet {
   }
 
   update(dt, game) {
+    this.px = this.x;
+    this.py = this.y;
     if (this.bossT > 0) this.bossT -= dt;
     if (this.defT > 0) this.defT -= dt;
     if (this.boostFx > 0) this.boostFx -= dt;
@@ -1354,29 +1361,72 @@ class Player {
      * 所以只有"重生 / 续关 / 保险"这种长无敌才闪，短无敌靠下面那圈护罩表达。 */
     const blink = this.invuln > PLAYER.hitInvuln && Math.floor(this.t * 22) % 2 === 0;
 
-    // 引擎尾焰（随机体一起缩小：原 26px 长、±8 宽，比机身还抢眼，也更难看清判定）
+    /* 引擎尾焰：**一条**（3.56）。
+     * 原来按 [-6, +6] 画两条，读起来是双发——但贴图的喷口只有一个（`nozzle(0.50)`，
+     * 居中的 0.035 宽），两条焰没有对应的机体结构；而且标题页那架是居中单条锥形，
+     * 同一架飞机在标题页和在游戏里长得不一样，是最容易被察觉的一种"不对劲"。
+     * 长度/宽度回到标题页的比例（宽约贴图宽的 1/4、长约 2/3 机高），
+     * 起点仍然贴住喷口（贴图高度 0.95 处，缩放 0.76 后是 y+16）。 */
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const flick = 1 + Math.sin(this.t * 40) * 0.18;
-    for (const dx of [-6, 6]) {
-      const len = 17 * flick;
-      const grd = ctx.createLinearGradient(this.x + dx, this.y + 16, this.x + dx, this.y + 16 + len);
-      grd.addColorStop(0, 'rgba(180,250,255,0.95)');
-      grd.addColorStop(0.5, 'rgba(90,200,255,0.45)');
-      grd.addColorStop(1, 'rgba(40,120,255,0)');
-      ctx.fillStyle = grd;
-      ctx.beginPath();
-      ctx.moveTo(this.x + dx - 4, this.y + 16);
-      ctx.lineTo(this.x + dx + 4, this.y + 16);
-      ctx.lineTo(this.x + dx, this.y + 16 + len);
-      ctx.closePath();
-      ctx.fill();
-    }
+    const flick = 1 + Math.sin(this.t * 40) * 0.16;
+    const flameLen = 23 * flick;
+    const grd = ctx.createLinearGradient(this.x, this.y + 16, this.x, this.y + 16 + flameLen);
+    grd.addColorStop(0, 'rgba(180,250,255,0.95)');
+    grd.addColorStop(0.5, 'rgba(90,200,255,0.45)');
+    grd.addColorStop(1, 'rgba(40,120,255,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.moveTo(this.x - 4.6, this.y + 16);
+    ctx.lineTo(this.x + 4.6, this.y + 16);
+    ctx.lineTo(this.x, this.y + 16 + flameLen);
+    ctx.closePath();
+    ctx.fill();
     ctx.restore();
 
     // 绘制时缩到 0.76（52 → 40），素材本身不动：
     // 改素材会重新排布整张图集，坐标一变、缓存没跟上就会全屏错位。
     Assets.draw(ctx, 'player', this.x, this.y, 0.76, blink ? 0.32 : 1);
+
+    /* 判定核心（3.56）：真正会吃伤害的只有以 `(x, y)` 为心、`PLAYER.hitR`（6px）为半径的
+     * 那一小块，可是正常游戏里除了调试层（`_drawHitboxes` 的红圈）没人看得见它——
+     * 玩家只能靠"机身边缘好像算"这种印象去躲弹，挨打时会觉得"明明擦过去了"。
+     *
+     * 这里把这块直接画成机身上的亮核，三个目的：
+     *  · **亮 = 会掉血**，弹幕贴上来时能看清"子弹已经进了判定圈"；
+     *  · 尺寸直接取 `PLAYER.hitR`，判定改了视觉自动跟着改，不再有两套尺寸；
+     *  · 边界给一圈实线——玩家能量出"刚好擦过去"的余量，而不是凭感觉。
+     * 不用 createRadialGradient：玩家只有一个，但每帧新建渐变是这套代码里
+     * 最容易悄悄吃掉帧数的写法，三层同心圆的观感已经够柔。 */
+    {
+      const r = PLAYER.hitR;
+      const A = blink ? 0.32 : 1;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      /* 分三层，全部压得很淡：机身本身是浅青，`lighter` 下稍微重一点就整块洗白，
+       * 读起来不是"核心亮"而是"贴图掉了一块"。 */
+      ctx.fillStyle = '#8fdcff';
+      for (const [k, a] of [[1.75, 0.055], [1.15, 0.10]]) {
+        ctx.globalAlpha = A * a;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, r * k, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // 边界：这一圈是"量尺寸"的，比填充重，但要细
+      ctx.globalAlpha = A * 0.55;
+      ctx.strokeStyle = '#d8f6ff';
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // 中心一点白：脉动，提示"这里是会掉血的那一点"
+      ctx.globalAlpha = A * (0.42 + Math.sin(this.t * 5.5) * 0.10);
+      ctx.fillStyle = '#f4feff';
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r * 0.40, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
 
     // 全弹发射强化状态
     if (this.boostT > 0) {
@@ -1722,6 +1772,12 @@ class Enemy {
     /* 直射型（def.nonAim）的"前方"就是机头方向：只有从底部升起的单位朝上，
      * looper 掉头后由 _update 置 true。不要用 rot 反推——侧向入场时 rot 是斜的。 */
     this.faceUp = def.ai === 'riser';
+    /* 双 U 巡航（3.54）：pathS 是沿路径走过的弧长，pathDir 是第一次转弯的方向。
+     * 这两个必须逐项复位——池对象复用时会带着上一只的进度，表现为"刚出生就
+     * 从屏幕中间拐弯"。 */
+    this.pathS = 0;
+    this.pathDir = opt.pathDir === 'left' ? -1 : 1;
+    this.pathR = opt.pathR || 72;
     this.hoverT = 0;
     this.arriveT = 0;
     this.entry = opt.entry || null;   // 'left' / 'right'：从屏幕侧面斜切进入
@@ -1795,8 +1851,10 @@ class Enemy {
     this.ramTY = 0;
     this.centerX = opt.centerX === undefined ? VIEW.w / 2 : opt.centerX;
     this.sweep = opt.sweep === undefined ? 132 : opt.sweep;
-    this.chargeState = 0;    // 0 常态 / 1 蓄力 / 2 冲刺 / 3 收尾
+    this.chargeState = 0;    // 0 常态 / 1 蓄力 / 2 冲刺 / 3 回气 / 4 离场
     this.chargeT = 0;
+    this.diveD = 0;          // 本次俯冲已飞距离
+    this.diveMax = 0;        // 冲到这个距离就算到位（按锁定时的间距算）
     this.cvx = 0;
     this.cvy = 0;
     this.active = true;
@@ -1978,7 +2036,10 @@ class Enemy {
         break;
 
       /* 虫子（电鳗）：常态正弦爬行，玩家靠近就蓄力扑上来。
-       * 三段：0 爬行 → 1 蓄力 0.42s（原地抖动，给反应窗口）→ 2 直冲 1s */
+       * 四段：0 爬行 → 1 蓄力 0.42s（原地抖动，给反应窗口）→ 2 直冲 1s
+       * → 3 回气 1s（上浮、机头回正），之后只要玩家还在 diveR 里就再扑一次。
+       * 刻意不设次数上限：它一只追着咬，玩家就得换位而不是站桩清屏。
+       * 唯一的自然出口是"玩家死了/被带到屏幕底边"——那时才顺着洋流离场。 */
       case 'worm': {
         if (this.chargeState === 0) {
           this.y += this.speed * dt;
@@ -2000,20 +2061,43 @@ class Enemy {
             const sp = this.def.diveSpeed || 430;
             this.cvx = Math.cos(a) * sp;
             this.cvy = Math.sin(a) * sp;
+            /* 记下"冲到哪算冲到位"。原来固定飞满 1 秒，430px/s 会冲出去 430px——
+             * 玩家只离它 150px 的话直接糊穿屏幕底边，收势时已经被判出场，
+             * 于是永远只有第一扑。改成冲到目标点外一点点就收，才留得下第二次。 */
+            this.diveD = 0;
+            this.diveMax = Math.hypot(p.x - this.x, p.y - this.y) * 1.08 + 24;
           }
         } else if (this.chargeState === 2) {
           this.chargeT -= dt;
+          const sp = Math.hypot(this.cvx, this.cvy);
+          this.diveD += sp * dt;
           this.x += this.cvx * dt;
           this.y += this.cvy * dt;
           this.rot = Math.atan2(this.cvy, this.cvx) - Math.PI;
           this.x = clamp(this.x, 16, VIEW.w - 16);
-          if (this.chargeT <= 0) {
+          if (this.chargeT <= 0 || this.diveD >= this.diveMax || this.y > VIEW.h - 40) {
             this.chargeState = 3;
+            this.chargeT = this.def.diveRest || 1.0;      // 两次俯冲之间的空档
             this.rot = 0;
-            this.baseX = this.x;
+          }
+        } else if (this.chargeState === 3) {
+          /* 回气：上浮而不是继续下坠。一是"冲完拉起来重新盘一圈"读得懂，
+           * 二是冲刺常常一路冲到屏幕下半，继续下沉就再没有二次俯冲的空间。 */
+          this.chargeT -= dt;
+          this.y -= this.speed * 0.55 * dt;
+          this.y = Math.max(this.y, PLAY_TOP + 40);
+          this.rot = 0;
+          if (this.chargeT <= 0) {
+            if (p.alive && this.y < VIEW.h - 60) {
+              this.chargeState = 0;
+              this.baseX = clamp(this.x, 62, VIEW.w - 62);  // 摆幅 62，夹住才不会半个身子在屏外
+              this.phase = -this.t * 2.2;                   // 正弦从 0 起步，复位瞬间不会横跳 62px
+            } else {
+              this.chargeState = 4;                        // 玩家没了 / 已到屏幕底边 → 离场
+            }
           }
         } else {
-          this.y += this.speed * 1.4 * dt;                // 冲完继续下坠离场
+          this.y += this.speed * 1.4 * dt;                // 离场
         }
         break;
       }
@@ -2069,6 +2153,11 @@ class Enemy {
             this.shoot(game, 'aim');
           }
         }
+        break;
+
+      // 双 U 巡航（3.54）：压到底部掉头爬回上半屏，再掉头压下来。几何见 _patrolStep
+      case 'patrol':
+        this._patrolStep(dt, game);
         break;
 
       // 从屏幕底部升起，边上升边射击
@@ -2192,6 +2281,76 @@ class Enemy {
         game.spawnEnemyBullet(bx, by, Math.cos(a) * 150, Math.sin(a) * 150, { kind: 'enemyAlt' });
       }
       SFX.enemyShoot();
+    }
+  }
+
+  /** 双 U 巡航的路径推进（3.54）。
+   *
+   *  路径由 5 段拼成，**按弧长参数化**而不是按角度积分：积分的写法在掉帧时
+   *  会画出半径不同的两个弯（每帧按 dt 转角，dt 抖动直接变成几何误差），
+   *  按弧长走则"走过多少 px 就在第几段"，帧率只影响快慢、不影响轨迹。
+   *
+   *    1 直下    (x0, -72) → (x0, lowCy)
+   *    2 下半圆  绕 (x0+dir·R, lowCy) 转 180°，出口朝上
+   *    3 直上    (x0+dir·2R, lowCy) → (x0+dir·2R, highCy)
+   *    4 上半圆  绕 (x0+dir·R, highCy) 转 180°，出口朝下
+   *    5 直下    (x0, highCy) → 屏幕外
+   *
+   *  lowCy/highCy 是圆心：下弯最低点落在 0.78H、上弯最高点落在 0.24H。
+   *  上弯顶点抬到 0.24H 而不是贴着 HUD，是因为 0.14H 附近会钻进血条下面——
+   *  那一段玩家既打不到、也看不清它什么时候掉头。 */
+  _patrolStep(dt, game) {
+    const R = this.pathR;
+    const dir = this.pathDir;
+    const x0 = this.baseX;
+    const lowCy = VIEW.h * 0.78 - R;       // 下弯圆心（最低点 = lowCy + R）
+    const highCy = VIEW.h * 0.24 + R;      // 上弯圆心（最高点 = highCy - R）
+    const L1 = lowCy + 72;                 // 屏幕顶外 72 → 下弯起点
+    const L2 = Math.PI * R;
+    const L3 = Math.max(0, lowCy - highCy);
+    const s = (this.pathS += this.speed * dt);
+
+    let x, y, dx, dy;
+    if (s < L1) {                                   // 1 直下
+      x = x0; y = -72 + s; dx = 0; dy = 1;
+    } else if (s < L1 + L2) {                       // 2 下半圆
+      const th = Math.PI - (s - L1) / R;
+      x = x0 + dir * R * (1 + Math.cos(th));
+      y = lowCy + R * Math.sin(th);
+      dx = dir * Math.sin(th); dy = -Math.cos(th);
+    } else if (s < L1 + L2 + L3) {                  // 3 直上
+      x = x0 + dir * 2 * R;
+      y = lowCy - (s - L1 - L2);
+      dx = 0; dy = -1;
+    } else if (s < L1 + L2 * 2 + L3) {              // 4 上半圆
+      const th = -(s - L1 - L2 - L3) / R;
+      x = x0 + dir * R * (1 + Math.cos(th));
+      y = highCy + R * Math.sin(th);
+      dx = dir * Math.sin(th); dy = -Math.cos(th);
+    } else {                                        // 5 直下离场
+      x = x0;
+      y = highCy + (s - L1 - L2 * 2 - L3);
+      dx = 0; dy = 1;
+    }
+
+    this.x = x;
+    this.y = y;
+    // 贴图默认机头朝下（rot=0），要让机头指向 (dx,dy)：rot = atan2(-dx, dy)
+    this.rot = Math.atan2(-dx, dy);
+    this.faceUp = dy < 0;
+
+    /* 只在向下压的两段开火。拉起段枪口向上，从那儿吐弹看着像尾炮；
+     * 转弯段枪口是横的，朝哪打都不对。留出这两段沉默，玩家能读出
+     * "它冲下来才危险"，这套走位也不会变成一块持续输出的移动炮台。 */
+    if (dy > 0.85) {
+      const p = game && game.player;
+      if (p && p.alive) {
+        this.fireT -= dt;
+        if (this.fireT <= 0 && this.inPlay(game)) {
+          this.fireT = this.def.fire;
+          this.shoot(game, 'aim');
+        }
+      }
     }
   }
 
@@ -2442,6 +2601,20 @@ class Enemy {
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.r * (2.4 - k * 0.9), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 回气：冷色圈由外向内收，和红色蓄力圈一冷一热，预告"它还会再来一次"
+    if (this.chargeState === 3) {
+      const k = 1 - this.chargeT / (this.def.diveRest || 1.0);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.14 + k * 0.24;
+      ctx.strokeStyle = '#7fe0ff';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r * (3.1 - k * 1.0), 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -2709,6 +2882,10 @@ class Boss {
     this.shieldPhase = 1;        // 0 右 / 1 下 / 2 左 / 3 上
     this.shieldT = 0;
     this.shieldFlash = 0;
+    /* 刚被挡下的那一处（3.55）：挡弹时记下方向，0.25 秒内把那一段弧点亮。
+     * 池对象，必须逐项复位——否则下一只没盾的 BOSS 会顶着上一只的亮弧。 */
+    this.shieldHotAng = 0;
+    this.shieldHotT = 0;
     /* 每格停留时长。3.53 起可配（盾面改成真挡之后，2.4 秒比子弹飞行时间还短，
      * 玩家"看到缺口开火"时子弹到时缺口已经转走了，只能靠猜）。 */
     this.shieldTurn = tr.shieldTurn || 2.4;
@@ -2833,7 +3010,7 @@ class Boss {
    * 用舰体轮廓会让子弹穿过膜、在膜里面才消失，看起来像"打穿了但没炸"；
    * 只有停在膜上才对得上眼睛看到的东西。半径常量必须与 draw() 里一致。 */
   barrierHitTest(x, y, r) {
-    const rx = this.w * 0.46 + r, ry = this.h * 0.46 + r;
+    const rx = this.shieldRx + r, ry = this.shieldRy + r;
     const dx = (x - this.x) / rx, dy = (y - this.y) / ry;
     return dx * dx + dy * dy <= 1;
   }
@@ -3011,6 +3188,7 @@ class Boss {
         this.shieldPhase = (this.shieldPhase + 1) % 4;
       }
       if (this.shieldFlash > 0) this.shieldFlash -= dt;
+      if (this.shieldHotT > 0) this.shieldHotT -= dt;
     }
 
     // 浮游炮：每座围绕自己的 baseAng 小幅摆动，四座不会挤在一起
@@ -3308,11 +3486,16 @@ class Boss {
     return n;
   }
 
+  /** 轮转护盾的膜：半径与绘制共用这一对 getter。
+   *  以前判定挂在本体轮廓（`_bossHits`）上、膜却画在 0.46 的椭圆上，
+   *  两者差 40 多像素——子弹要穿进机体里才被拦。 */
+  get shieldRx() { return this.w * 0.46; }
+  get shieldRy() { return this.h * 0.46; }
+
   /** 轮转护盾（boss3）：这一点所在的方向是否被盾面盖住（true = 挡住，不结算伤害）。
    *
-   *  只判角度、不判距离：调用方都已经确认"打在 BOSS 身上"。
-   *  hit() 兜底时传的是**玩家坐标**（玩家永远在盾外），带距离判定会把这一路误判成没挡；
-   *  子弹命中那一处则由 game 传命中点，两者用同一个象限口径，不会互相矛盾。 */
+   *  只判方向、不判距离——距离由 `shieldHitTest()` 负责。
+   *  象限口径与绘制完全一致：第 i 段弧的中心角就是 i×90°，`round(ang/90°)` 正好落在同一格。 */
   shieldBlocks(x, y) {
     if (!this.shieldCfg) return false;
     let quad = Math.round(Math.atan2(y - this.y, x - this.x) / (Math.PI / 2));
@@ -3320,21 +3503,39 @@ class Boss {
     return quad !== this.shieldPhase && quad !== (this.shieldPhase + 1) % 4;
   }
 
-  /* opt.raw（3.49）：跳过护盾轮转，给"拆炮台连带掉血"和保险用。
-   * 那不是一次"打到本体"的攻击，而是炮塔炸开把舰体撕了一道口子 / 一颗清屏雷；
+  /** 轮转护盾的挡弹判定（3.55）：**这一帧是否跨过那层膜**，且跨入的方向被盾面盖住。
+   *
+   *  3.53 把判定挂在 `_bossHits` 之后，膜画在 0.46 的椭圆上、本体轮廓最远只到 78px
+   *  （boss3 膜半径 119.6×95.7），子弹要穿进机体再飞 40 多像素才被拦下。
+   *  玩家看到的是"子弹打进 Boss 身上，然后血条不动"——护盾读起来只是个数值惩罚。
+   *
+   *  现在改成"跨过膜的那一帧就挡"，弹开点落在膜上。判"刚跨过"必须用上一帧位置
+   *  （`px/py` 由 `Bullet.update` 记）而不是"走到膜内就挡"：从缺口穿进来的子弹
+   *  本来就在膜内，再往后走会被某一帧按当时的角度补判命中盾，等于缺口时有时无。 */
+  shieldHitTest(x, y, px, py) {
+    if (!this.shieldCfg) return false;
+    const rx = this.shieldRx, ry = this.shieldRy;
+    const dx = (x - this.x) / rx, dy = (y - this.y) / ry;
+    if (dx * dx + dy * dy > 1) return false;          // 还在膜外
+    if (px !== undefined) {
+      const qx = (px - this.x) / rx, qy = (py - this.y) / ry;
+      if (qx * qx + qy * qy <= 1) return false;       // 上一帧就在膜内：从缺口进来的，放行
+    }
+    return this.shieldBlocks(x, y);
+  }
+
+  /* opt.raw（3.49）：给"拆炮台连带掉血"和保险用——那不是一次命中，是舰体被撕开 / 一颗清屏雷。
    * 保险尤其不能被盾吃掉，它是玩家拿来破局的唯一手段。
    *
-   * 3.53：盾面改成**完全挡住**（原来是 28% 减伤）。28% 的版本里"等缺口转过来"
-   * 只是"多打三倍效率"，玩家没有理由等，一直顶着盾打就行——轮转机制等于不存在。
-   * 现在盾面期血量条一动不动，玩家必须把输出压在缺口那半圈上。 */
+   * 3.53：盾面从"打错方向只吃 28%"改成**完全挡住**。28% 的版本里"等缺口转过来"
+   * 只是多打三倍效率，玩家没有理由等，一直顶着盾打就行——轮转机制等于不存在。
+   *
+   * 3.55：**这里不再做挡弹判定**。挡弹统一由 `shieldHitTest()` 在命中路径上完成
+   * （玩家子弹在 `game._collide`、激光在 `_fireBossLaser`），那两处拿得到真实命中点。
+   * 这里若拿玩家坐标兜底，会跟命中点打架：玩家横移之后，一颗"从缺口打进去"的子弹
+   * 会被按玩家当前所在方向补判成挡下，表现就是"缺口里打进去也不掉血"。 */
   hit(dmg, game, opt) {
     if (this.dead) return;
-
-    if (!(opt && opt.raw) && game && game.player &&
-      this.shieldBlocks(game.player.x, game.player.y)) {
-      this.shieldFlash = 0.22;
-      return;
-    }
 
     this.hp -= dmg;
     this.flash = 0.06;
@@ -3346,39 +3547,127 @@ class Boss {
     }
   }
 
+  /** 挡弹涟漪：一圈向外扩的环 + 迅速缩掉的亮核。
+   *  出场护罩（`invuln`）与轮转护盾共用同一套反馈——两者都是"子弹停在一层膜上"，
+   *  用同一种视觉语言，玩家才认得出这是同一件事。只有环会读成一个气泡，
+   *  加一个一帧就收掉的亮核才像"弹开"。 */
+  _drawBarrierRipples(ctx) {
+    if (!this.barrierHits.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const h of this.barrierHits) {
+      const k = h.t / 0.3;                     // 1 → 0
+      ctx.globalAlpha = k * 0.85;
+      ctx.strokeStyle = '#e8fbff';
+      ctx.lineWidth = 0.8 + k * 2.2;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, (1 - k) * 13 + 2, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = k * k * 0.9;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, 1 + k * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   /** 护盾轮转 / 浮游炮 / 引力场的绘制 */
   _drawGimmickFx(ctx) {
-    // ---- 护盾：三段实弧 + 弱点段虚线缺口 ----
-    if (this.shieldCfg) {
-      const R = this.w * 0.47;
-      for (let i = 0; i < 4; i++) {
-        const a0 = i * Math.PI / 2 - Math.PI / 4;
-        const weak = i === this.shieldPhase || i === (this.shieldPhase + 1) % 4;
-        ctx.save();
-        if (weak) {
-          // 弱点：细虚线，视觉上像"缺口"
-          ctx.globalAlpha = 0.30 + Math.sin(this.t * 7) * 0.12;
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([5, 7]);
-        } else {
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.globalAlpha = 0.55;
-          ctx.strokeStyle = this.stage.accent;
-          ctx.lineWidth = 4;
-        }
+    /* ---- 护盾：挡的那半圈画成实体光膜，缺口那半圈几乎不画 ----
+     *
+     *  3.53 是"两段实弧（挡）+ 两段白色虚线（缺口）"，而且实弧用的是 stage.accent
+     *  ——深海主题的 accent 是墨青，压在深色背景上比缺口那圈白虚线**还暗**。
+     *  玩家看到的是"下面这圈亮白线正对着我"，于是把缺口当成了盾：
+     *  "护盾朝着我却打得进去"。方向读反了，机制再怎么改都白搭。
+     *
+     *  现在按"亮 = 有盾 = 打不进"排：
+     *    · 挡面：180° 厚弧 + 扇形淡填充 + 三层描边（外光晕/主体/内高光），固定冷色不随主题变
+     *    · 缺口：alpha 0.12 的细虚线，只留"膜还在、只是这半边薄"的暗示
+     *  半径走 `shieldRx/shieldRy`，与 `shieldHitTest()` 完全同一口径：
+     *  画在哪就在哪挡，是这套机制能被读懂的前提。 */
+    if (this.shieldCfg && !this.invuln) {
+      const rx = this.shieldRx, ry = this.shieldRy;
+      // 缺口半圈的起止角：第 i 段弧覆盖 [i×90°-45°, i×90°+45°]
+      const g0 = this.shieldPhase * Math.PI / 2 - Math.PI / 4;
+      const g1 = g0 + Math.PI;
+      const pulse = 0.5 + Math.sin(this.t * 3.4) * 0.5;
+
+      // ---- 缺口：极淡细虚线 ----
+      ctx.save();
+      ctx.globalAlpha = 0.12 + pulse * 0.04;
+      ctx.strokeStyle = '#9fe8ff';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 9]);
+      ctx.lineDashOffset = -this.t * 26;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, rx, ry, 0, g0, g1);
+      ctx.stroke();
+      ctx.restore();
+
+      // ---- 挡面 ----
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = '#7fe6ff';
+      ctx.strokeStyle = '#9fe8ff';
+      // 扇形淡填充：只有一条弧线读作"一道光"，有面才读作"盾"
+      ctx.globalAlpha = 0.10 + pulse * 0.05;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, rx, ry, 0, g1, g0 + Math.PI * 2);
+      ctx.lineTo(this.x, this.y);
+      ctx.closePath();
+      ctx.fill();
+      /* 三层描边代替 shadowBlur：这样既有"发光"的厚度，又不用每帧重算模糊
+       * （boss3 从第二条血开始同屏还有一堆弹幕，模糊是最容易被它吃掉的）。 */
+      const bands = [
+        [12, 0.14, '#5fd8ff'],
+        [5.5, 0.62, '#9fe8ff'],
+        [1.8, 0.95, '#ffffff']
+      ];
+      for (const [w, a, col] of bands) {
+        ctx.globalAlpha = a * (0.86 + pulse * 0.14);
+        ctx.lineWidth = w;
+        ctx.strokeStyle = col;
         ctx.beginPath();
-        ctx.arc(this.x, this.y, R, a0 + 0.08, a0 + Math.PI / 2 - 0.20);
+        ctx.ellipse(this.x, this.y, rx, ry, 0, g1, g0 + Math.PI * 2);
+        ctx.stroke();
+      }
+      /* 内层一条流动虚线：把"能量膜"和"贴图描边"区分开——描边不会动。
+       * 只画在挡的那半圈上，缺口那半圈保持干净。 */
+      ctx.globalAlpha = 0.30 + pulse * 0.12;
+      ctx.strokeStyle = '#c8f2ff';
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([10, 12]);
+      ctx.lineDashOffset = -this.t * 40;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, rx - 9, ry - 9, 0, g1, g0 + Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // 刚被挡下的那一处：这一段弧亮一下，玩家能看出"弹是停在这层膜上"
+      if (this.shieldHotT > 0) {
+        const k = this.shieldHotT / 0.25;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = k * 0.9;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2 + k * 6;
+        ctx.beginPath();
+        ctx.ellipse(this.x, this.y, rx, ry, 0,
+          this.shieldHotAng - 0.42, this.shieldHotAng + 0.42);
         ctx.stroke();
         ctx.restore();
       }
+      this._drawBarrierRipples(ctx);
       if (this.shieldFlash > 0) {
         ctx.save();
-        ctx.globalAlpha = this.shieldFlash / 0.18 * 0.45;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = this.shieldFlash / 0.22 * 0.35;
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(this.x, this.y, R + 3, 0, Math.PI * 2);
+        ctx.ellipse(this.x, this.y, rx + 3, ry + 3, 0, 0, Math.PI * 2);
         ctx.stroke();
         ctx.restore();
       }
@@ -3726,23 +4015,8 @@ class Boss {
       ctx.ellipse(this.x, this.y, rx * 1.045, ry * 1.045, 0, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
-      // 命中涟漪：一圈向外扩的环 + 命中点亮一下。
-      // 只有环会读成"一个气泡"，加一个迅速缩掉的亮核才像"弹开"。
-      for (const h of this.barrierHits) {
-        const k = h.t / 0.3;                     // 1 → 0
-        ctx.globalAlpha = k * 0.85;
-        ctx.strokeStyle = '#e8fbff';
-        ctx.lineWidth = 0.8 + k * 2.2;
-        ctx.beginPath();
-        ctx.arc(h.x, h.y, (1 - k) * 13 + 2, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = k * k * 0.9;
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.arc(h.x, h.y, 1 + k * 2.2, 0, Math.PI * 2);
-        ctx.fill();
-      }
       ctx.restore();
+      this._drawBarrierRipples(ctx);
     }
 
     // 阶段护盾提示

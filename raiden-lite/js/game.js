@@ -578,10 +578,16 @@ class Game {
       arr.push({
         kind: w.kind, n: w.n, form: w.form, hp: w.hp, speed: w.speed,
         at: w.at * ts, gap: gap, side: w.side, arc: w.arc, diag: w.diag,
-        lane: w.lane          // 小 BOSS 车道覆盖：漏了它两只小 BOSS 会叠在正中
+        lane: w.lane,         // 小 BOSS 车道覆盖：漏了它两只小 BOSS 会叠在正中
+        /* 巡航机的路线参数必须一起带过来：这个 arr 是逐字段重建的，
+         * 漏掉 uo 就会退化成默认的横排编队（机型还是它，走位却没了）——
+         * 静默失效、没有任何报错，只是"新敌人看起来没生效" */
+        uo: w.uo, max: w.max, pathR: w.pathR
       });
-      // 中型机 / 蛇不吃补充波：否则 1 只会被自动加成 3 只，数量不可控
-      if (!isMiniKind(w.kind) && w.kind !== 'snake') {
+      // 中型机 / 蛇 / 巡航机不吃补充波：前两者是"数量不可控"，
+      // 巡航机是"一架在屏幕上待 17 秒"，补一波进来等于同屏叠四架，
+      // 峰值会直接抬 7 只，把"这一架我还没打完"的焦点冲掉
+      if (!isMiniKind(w.kind) && w.kind !== 'snake' && !w.uo) {
         arr.push({
           kind: w.kind,
           n: Math.max(2, Math.round(w.n * 0.6)),
@@ -1640,6 +1646,8 @@ class Game {
       side: wave.side,                         // 'left' / 'right'：从侧面入场
       arc: wave.arc,                           // true：侧下方 → 侧上方的弧线掠袭
       diag: wave.diag,                         // 'ltr' / 'rtl'：对角穿越
+      pathDir: wave.pathDir,                   // 'left' / 'right'：双 U 巡航的首次转弯方向
+      pathR: wave.pathR,                       // 双 U 巡航的转弯半径
       twin: wave.twin                          // 蛇：两条对向游走
     });
   }
@@ -2075,7 +2083,9 @@ class Game {
   _outroPool() {
     if (this.outroPool) return this.outroPool;
     // 排除：小 BOSS 本身、从底部升起的单位、漂雷（这几类不成编队）
-    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH'].concat(MINI_KINDS);
+    // patrol 也要排除：它的路线要 17 秒才出屏，收尾段补一架进来，
+    // "最后一组飞出屏幕就进 BOSS 预警"这条节奏会被硬拖十几秒
+    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH', 'patrol'].concat(MINI_KINDS);
     const kinds = [];
     const forms = [];
     for (const w of this.level.waves) {
@@ -2146,6 +2156,8 @@ class Game {
       entry: q.side,
       arc: q.arc,
       diag: q.diag,
+      pathDir: q.pathDir,
+      pathR: q.pathR,
       shieldMul: shieldMul(this.level.id)
     });
   }
@@ -2225,8 +2237,16 @@ class Game {
 
     // BOSS：用轮廓判定的横向范围近似"光束是否压在它身上"
     const bo = this.boss;
-    if (this.bossActive && bo && !bo.dead && !bo.invuln && bo.y < p.y) {
-      if (this._bossHits(bo, p.x, bo.y, halfW)) {
+    if (this.bossActive && bo && !bo.dead && !bo.invuln && bo.y < p.y &&
+      this._bossHits(bo, p.x, bo.y, halfW)) {
+      /* 轮转护盾（3.55）：光束是从玩家那一侧打上来的，那一侧有盾面就顶住。
+       * 激光是贯穿柱、没有具体命中点，"玩家所在方向"是这里唯一说得通的口径。
+       * 被挡时不结算伤害，但让那一段弧一直亮着——否则玩家只会以为激光坏了。 */
+      if (bo.shieldBlocks(p.x, p.y)) {
+        bo.shieldHotAng = Math.atan2(p.y - bo.y, p.x - bo.x);
+        bo.shieldHotT = 0.12;
+        bo.shieldFlash = 0.12;
+      } else {
         bo.hit(PLAYER.laserDmgBoss, this);
         this.addParticle(p.x + rand(-14, 14), bo.y + rand(-30, 30), {
           vx: rand(-40, 40), vy: rand(-90, -30), life: 0.22, r: 4, color: '#e0ccff'
@@ -2873,6 +2893,34 @@ class Game {
       } else if (boss) {
         const bo = boss;
 
+        /* 轮转护盾（3.55）：盾面朝这边，就在**膜上**把子弹弹开。
+         * 位置必须在部件/本体判定之前——膜是最外层，炮塔伸出去的炮口也在膜内，
+         * 先判本体的话子弹会先穿进膜、打进机体、再被挡下，弹开点凭空"陷进去"四十像素。
+         * 判定只看"这一帧是否从膜外跨进膜内"（`shieldHitTest` 用上一帧位置），
+         * 所以从缺口打进去的子弹不会被后面某一帧补判成命中盾。 */
+        if (bo.shieldHitTest(b.x, b.y, b.px, b.py)) {
+          b.active = false;
+          /* 火花与涟漪投影回膜面：子弹这一帧已经越过膜 0~15px（一帧的位移），
+           * 直接用它当前位置画，弹开点会比膜"陷进去"一点点；
+           * 归一化距离除回去就精确落在膜上。 */
+          const ex = (b.x - bo.x) / bo.shieldRx, ey = (b.y - bo.y) / bo.shieldRy;
+          const en = Math.hypot(ex, ey) || 1;
+          const hx = bo.x + (b.x - bo.x) / en;
+          const hy = bo.y + (b.y - bo.y) / en;
+          bo.shieldFlash = 0.22;
+          bo.shieldHotAng = Math.atan2(hy - bo.y, hx - bo.x);
+          bo.shieldHotT = 0.25;
+          bo.barrierHit(hx, hy);
+          for (let i = 0; i < 3; i++) {
+            this.addParticle(hx, hy, {
+              vx: rand(-90, 90), vy: rand(-30, 90), life: 0.22, r: 3,
+              color: i ? '#9fe8ff' : '#ffffff'
+            });
+          }
+          SFX.hit();
+          continue;
+        }
+
         // 先判可破坏部件：打掉侧翼武器能实实在在削弱弹幕
         let hitPart = false;
         for (const pt of bo.parts) {
@@ -2926,18 +2974,6 @@ class Game {
         // （旧代码这里是 w×0.40 / h×0.36 的矩形，比玩家撞机的框还大）。
         // 给子弹留 2px 余量：轮廓是内切圆近似的，边缘小部件容易被漏掉。
         if (this._bossHits(bo, b.x, b.y, b.r + 2, false)) {
-          /* 轮转护盾（3.53）：缺口之外把子弹挡在盾面上——消耗子弹、跳冷色火花、
-           * 护盾弧闪一下，但不结算伤害。位置放在轮廓命中之后、hit() 之前：
-           * 这样"打盾"与"打本体"是两条路，前者不触发受击白闪，血条也不动。 */
-          if (bo.shieldBlocks(b.x, b.y)) {
-            b.active = false;
-            bo.shieldFlash = 0.22;
-            this.addParticle(b.x, b.y, {
-              vx: rand(-70, 70), vy: rand(-90, 10), life: 0.22, r: 3, color: '#9fe8ff'
-            });
-            SFX.hit();
-            continue;
-          }
           // 穿透弹在 BOSS 体内会停留多帧，用 0.14s 的间隔限制重复结算
           if (b.pierce) {
             if (b.bossT > 0) continue;
@@ -4210,6 +4246,32 @@ class Game {
         const px = clamp(bo.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
         const py = bo.y + Math.sin(d.ang) * d.r;
         ring(px, py, 13, 'rgba(125,250,255,1)', 1.2);
+      }
+
+      /* 轮转护盾（3.55）：判定在**膜上**（`shieldHitTest`），所以调试层画的是膜
+       * 而不是本体轮廓——挡的那半圈实线、缺口那半圈虚线，两端各一道分界短线。
+       * 这条线就是"子弹会在哪里停住"的准确答案。 */
+      if (bo.shieldCfg && !bo.invuln) {
+        const rx = bo.shieldRx, ry = bo.shieldRy;
+        const g0 = bo.shieldPhase * Math.PI / 2 - Math.PI / 4;
+        ctx.strokeStyle = 'rgba(120,235,255,0.95)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.ellipse(bo.x, bo.y, rx, ry, 0, g0 + Math.PI, g0 + Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([4, 5]);
+        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(bo.x, bo.y, rx, ry, 0, g0, g0 + Math.PI);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(255,209,102,0.95)';
+        for (const a of [g0, g0 + Math.PI]) {
+          ctx.beginPath();
+          ctx.moveTo(bo.x + Math.cos(a) * rx, bo.y + Math.sin(a) * ry);
+          ctx.lineTo(bo.x + Math.cos(a) * (rx + 14), bo.y + Math.sin(a) * (ry + 14));
+          ctx.stroke();
+        }
       }
     }
 
