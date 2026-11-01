@@ -6,6 +6,8 @@
 # 平台目录
 .codebuddy/
 .cloudstudio
+# 本机工作记忆（.workbuddy/memory 的日志、缓存）：只服务这台机器，不进仓库
+.workbuddy/
 
 # Python
 __pycache__/

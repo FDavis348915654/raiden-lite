@@ -17,6 +17,12 @@ const PAUSE_BTN = { x: VIEW.w - 28, y: 74, r: 13 };
 const SLOT_UI = { x: 18, y: 62, w: 74, h: 18, gap: 5 };
 // 通关页出现后锁定输入的秒数：最后一击常常是连点，不锁会直接跳过结算和致谢
 const WIN_INPUT_LOCK = 2.0;
+/* 失败页出现后锁定输入的秒数（1.4s）。这里比通关页更该锁：
+ * 爆机那一刻玩家手指往往还在连点（躲弹幕的惯性），结算页一冒出来就被"点掉"——
+ * 要么白耗一次续关机会（点一下就 continueRun），要么直接重开，
+ * 连"死在哪关、多少分"都没看清。锁定期内点击/空格一律不生效，
+ * 画面同步把提示换成"请稍候…"，否则玩家会以为点击失灵。 */
+const OVER_INPUT_LOCK = 1.4;
 // 玩家受击的红晕时长：要盖过 0.46 秒震屏，玩家才能把"泛红"和"被击中"对上号
 const HURT_DUR = 0.7;
 
@@ -394,6 +400,8 @@ class Game {
 
       // 失败页：还有续关机会就先续关，否则重开
       if (this.state === 'gameover') {
+        // 刚冒出来那一秒多的点击一律吃掉（原因见 OVER_INPUT_LOCK）
+        if (this.deadT < OVER_INPUT_LOCK) return;
         if (this.contT > 0) this.continueRun();
         else this.beginRun();
         return;
@@ -436,6 +444,8 @@ class Game {
       if (k === 'arrowdown' || k === 's') input.down = true;
       if (k === ' ' || k === 'enter') {
         if (this.state === 'gameover') {
+          // 和点击同一把锁：空格/回车按住不放最容易在结算页闪出的瞬间触发
+          if (this.deadT < OVER_INPUT_LOCK) { e.preventDefault(); return; }
           if (this.contT > 0) this.continueRun();
           else this.beginRun();
         } else if (this.state === 'title' || this.state === 'win') {
@@ -1877,7 +1887,9 @@ class Game {
 
     if (this.state === 'gameover') {
       this.deadT += dt;
-      if (this.contT > 0) this.contT -= dt;
+      /* 续关倒计时等输入锁结束再开始走：锁定期点不动，
+       * 却先把 9 秒扣掉 1.4 秒，等于凭空少了一次"来得及反应"的时间。 */
+      if (this.contT > 0 && this.deadT >= OVER_INPUT_LOCK) this.contT -= dt;
       this._updateParticles(dt);
       this._updateBullets(dt);
       this._updateEnemies(dt);
@@ -3943,6 +3955,9 @@ class Game {
   _drawGameOver(ctx, cx) {
     const canCont = this.contT > 0;
     const fade = clamp(this.deadT / 0.35, 0, 1);
+    /* 输入锁期内把"能点的东西"整体压暗、提示换成"请稍候"：
+     * 只锁输入不给视觉反馈，玩家第一反应是"点了没反应"，比误触更糟。 */
+    const locked = this.deadT < OVER_INPUT_LOCK;
     const t = this.totalT || 0;
 
     ctx.save();
@@ -4037,7 +4052,11 @@ class Game {
       ctx.fillText(this.deathBoss ? '保留火力 · 补满保险 · BOSS 血量不重置'
         : '保留火力 · 补满保险 · 关卡进度保留', cx, cy2 + r + 78);
 
-      if (Math.floor(t * 1.8) % 2 === 0) {
+      if (locked) {
+        ctx.fillStyle = 'rgba(150,185,215,0.55)';
+        ctx.font = '600 13px "PingFang SC", sans-serif';
+        ctx.fillText('请稍候…', cx, cy2 + r + 124);
+      } else if (Math.floor(t * 1.8) % 2 === 0) {
         ctx.fillStyle = '#ffffff';
         ctx.font = '600 15px "PingFang SC", sans-serif';
         ctx.fillText('点击屏幕 / 空格 续关', cx, cy2 + r + 124);
@@ -4058,6 +4077,8 @@ class Game {
       const by0 = VIEW.h * 0.545;
       const glow = 0.45 + Math.sin(t * 3) * 0.22;
 
+      // 输入锁定期把按钮压暗：看得见但点不动，比"消失"更不吓人
+      if (locked) ctx.globalAlpha = fade * 0.45;
       ctx.fillStyle = 'rgba(30,96,140,0.20)';
       ctx.fillRect(bx0, by0, bw, bh);
       ctx.strokeStyle = 'rgba(127,224,255,' + glow + ')';
@@ -4072,7 +4093,8 @@ class Game {
 
       ctx.fillStyle = 'rgba(140,175,205,0.6)';
       ctx.font = '10px "PingFang SC", sans-serif';
-      ctx.fillText('点击屏幕 / 按空格', cx, by0 + bh + 22);
+      ctx.fillText(locked ? '请稍候…' : '点击屏幕 / 按空格', cx, by0 + bh + 22);
+      ctx.globalAlpha = fade;
     }
 
     ctx.restore();
@@ -4507,9 +4529,9 @@ class Game {
       }
 
       // 通关致谢：原来贴在 0.80H，下方空出一大片、像掉在页面底部；
-      // 现在 0.62H + 18px，和 SCORE 同级、和上面的操作提示留一段呼吸
-      ctx.fillStyle = 'rgba(200,228,248,0.78)';
-      ctx.font = '18px "PingFang SC", sans-serif';
+      // 现在 0.62H、字号 18 → 24px——它是整局的最后一句，比操作提示更该被看见
+      ctx.fillStyle = 'rgba(214,236,252,0.88)';
+      ctx.font = '24px "PingFang SC", sans-serif';
       ctx.fillText('感谢你游玩本游戏', cx, VIEW.h * 0.62);
       ctx.restore();
       ctx.textAlign = 'left';
