@@ -74,7 +74,10 @@ node /root/.codebuddy/skills/sites/scripts/publish.js --dir /workspace/raiden-li
 
 ## Git 约定
 
-- **每次对话开始的第一件事：`git sync`（= `pull --rebase --autostash`）**。这个工程会在多台电脑上开发，不先同步就会在旧代码上动手，提交时还得手工解冲突。即使只是"看一眼""调个数值"也要先拉；连续多轮对话时，间隔较久（换机器、隔天）也要再拉一次
+- **每次执行任务前先同步：`git pull --rebase --autostash origin main`**。这个工程会在多台电脑上开发，不先同步就会在旧代码上动手，提交时还得手工解冲突。即使只是"看一眼""调个数值"也要先拉；连续多轮对话时，间隔较久（换机器、隔天）也要再拉一次
+  - 标准动作：`git fetch origin` → 看 `git status -sb` 有没有 divergence → 落后就 `pull --rebase --autostash` → 再开工
+  - 工作区脏也能拉（`--autostash` 会自动存一把再恢复），但**拉之前先看 `git status --porcelain`**：本地有未完成的改动时，先确认这些改动与远端不冲突，别让 autostash 把半截代码藏起来
+  - 拉下来是**只读同步**，不产生任何提交；冲突时**停下来报告给 Davis**，不要自行 `reset` / `checkout` / 手工合并后默默提交
 - **拉完先看 `VERSION` 和 `index.html` 的 8 处 `?v=`**：另一台机器可能已经发过版。远端比本地高就顺着往上加，不要回退版本号；两边同时升到同一个号时，后提交的一方要改成更高的那个（`grep -c '?v=<版本>' index.html` 必须等于 8）
 - **只在用户说"备份"时提交**，平时改代码不乱 commit
 - 提交作者固定：`FDavis348915654 <348915654@qq.com>`
