@@ -2085,7 +2085,9 @@ class Game {
     // 排除：小 BOSS 本身、从底部升起的单位、漂雷（这几类不成编队）
     // patrol 也要排除：它的路线要 17 秒才出屏，收尾段补一架进来，
     // "最后一组飞出屏幕就进 BOSS 预警"这条节奏会被硬拖十几秒
-    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH', 'patrol'].concat(MINI_KINDS);
+    /* eelH（高级电鳗，3.59）也要排除：它要扑 3 次，一轮 1.9 秒，加上回气后的
+     * 离场下坠能在屏上待十秒上下，收尾段补进来一架就能把 BOSS 预警硬拖几秒。 */
+    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH', 'patrol', 'eelH'].concat(MINI_KINDS);
     const kinds = [];
     const forms = [];
     for (const w of this.level.waves) {

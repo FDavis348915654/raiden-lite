@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.57.0';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.59.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -714,10 +714,18 @@ const ENEMY_DEFS = {
   mine:      { sprite: 'e_mine',      hp: 12,  speed: 42,  score: 180, r: 0.68, ai: 'drift',  deathBurst: 12 },
   formation: { sprite: 'e_formation', hp: 10,  speed: 105, score: 180, r: 0.64, ai: 'straight' },
   torpedo:   { sprite: 'e_torpedo',   hp: 7,  speed: 250, score: 240, r: 0.58, ai: 'straight' },
-  /* diveRest：一次俯冲收势后到下一次蓄力之间的空档（3.57 起不设次数上限，
-   * 只要玩家还在 diveR 内就继续扑，逼人换位）。调大 = 追得松，调小 = 贴着咬。 */
+  /* diveRest：一次俯冲收势后到下一次蓄力之间的空档；dives：一只虫子最多俯冲几次
+   * （3.58 设上限，普通 2 次、精英 4 次），精英按 eliteDives 走。
+   * eliteHpMul：电鳗专属的精英血量倍率（3.59）。全局 ELITE_HP_MUL 是 3.2，
+   * 电鳗基数只有 34，×3.2 ≈ 109 血——在第 3 关刚成型的火力面前几乎等于普通机，
+   * 挂个金色光环却两枪掉，所以单独抬到 5.0（170 血）。只改这一族，不动别的机型。 */
   eel:       { sprite: 'e_eel',       hp: 34,  speed: 74,  score: 480, r: 0.58, ai: 'worm',
-               diveR: 150, diveSpeed: 430, diveRest: 1.0 },
+               diveR: 150, diveSpeed: 430, diveRest: 1.0, dives: 2, eliteDives: 4, eliteHpMul: 5.0 },
+  /* 高级电鳗：同一族的中间档（3.59）。比普通机大一圈、慢一点、扑 3 次，
+   * 96 血介于普通 34 与精英 170 之间——它存在的意义是让"电鳗"在终局关还有分量，
+   * 而不是被满槽火力当杂兵顺手扫掉。青环用来和精英的金环区分。 */
+  eelH:      { sprite: 'e_eel',       hp: 96,  speed: 70,  score: 1000, r: 0.62, ai: 'worm',  scale: 1.16,
+               aura: '#7fe0ff', diveR: 170, diveSpeed: 460, diveRest: 0.85, dives: 3 },
   jelly:     { sprite: 'e_jelly',     hp: 38,  speed: 48,  score: 420, r: 0.64, ai: 'hover',   fire: 3.1 },
   drone:     { sprite: 'e_drone',     hp: 7,  speed: 135, score: 140, r: 0.58, ai: 'chase' },
   shield:    { sprite: 'e_shield',    hp: 38,  speed: 55,  score: 600, r: 0.68, ai: 'tank' },
@@ -834,7 +842,7 @@ const ENTRY_GUARD = {
   buf: {
     scout: 0.06, fighter: 0.06, diver: 0.08, drone: 0.06,
     kamikaze: 0.06, formation: 0.08, mine: 0.10, mineH: 0.10,
-    torpedo: 0.12, eel: 0.14, flame: 0.12, mirror: 0.14, looper: 0,
+    torpedo: 0.12, eel: 0.14, eelH: 0.16, flame: 0.12, mirror: 0.14, looper: 0,
     heavy: 0.22, bomber: 0.20, jelly: 0.18, shield: 0.22, deflect: 0.22,
     riser: 0, miniboss: 0, mbSniper: 0, mbPrism: 0, mbRam: 0,
     splitling: 0.15
@@ -1293,7 +1301,7 @@ const LEVELS = [
     bossName: '终焉星环',
     bossHp: 10400,
     bossRate: 0.84,
-    hint: '全机型混编 · 双蛇',
+    hint: '全机型混编 · 高级电鳗 · 双蛇',
     /* 终局关只给 heavy 开压制：它的 pincer 段从顶部两翼压下来，正是"提前布弹"最合适的位置。
      * 不给 sniper 是因为侧向入场（side）是 235px/s 斜切进来，0.2 秒就整只进屏，
      * 压制档（探入四成才放行）在它身上根本来不及生效——写进白名单只是噪音。
@@ -1332,7 +1340,11 @@ const LEVELS = [
        * 让屏幕上出现"往返回旋"的第三条运动线（前有自机弹幕、侧面有蜂群、这里有环线） */
       { at: 38.2, kind: 'patrol',   n: 3,  uo: true, gap: 1.5 },
       { at: 40.0, kind: 'kamikaze', n: 7,  form: 'diamond', speed: 178, gap: 0.14 },
-      { at: 43.5, kind: 'eel',      n: 7,  form: 'cross',   speed: 104, gap: 0.24 },
+      /* 终局回收：高级电鳗（3.59）。8.5 秒那波仍是普通电鳗，这里换成强化版——
+       * 同一关内前后对照，玩家能直接读出"这只更大、更耐打、扑得更勤"。
+       * 血量按 96 给（不是精英的 170）：这一波是"双蛇登场前最后一次压力测试"，
+       * 8 只 170 血的虫子会把玩家钉在屏幕下半，反而没机会准备双蛇。 */
+      { at: 43.5, kind: 'eelH',     n: 5,  form: 'cross',   speed: 104, gap: 0.28 },
       // 中段小 BOSS：和前八关一样"波次过半来一波"，双蛇仍然独占最后 10 秒
       { at: 24.0, kind: 'miniboss', n: 2,  form: 'line',    speed: 58,  gap: 0.28, hp: 820 },
       { at: 24.3, kind: 'mbRam',    n: 1,  form: 'line',    speed: 60,  gap: 0.28, lane: 0.5 },

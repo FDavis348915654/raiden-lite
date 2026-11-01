@@ -1751,7 +1751,8 @@ class Enemy {
     this.elite = !!opt.elite;
     this.scale = def.scale || 1;
     if (this.elite) {
-      this.hp = Math.round(this.hp * ELITE_HP_MUL);
+      // 机型可以覆盖倍率：电鳗基数只有 34，全局 3.2 倍撑不起"精英"这个身份（见 config 注释）
+      this.hp = Math.round(this.hp * (def.eliteHpMul || ELITE_HP_MUL));
       this.speed *= 0.86;
       this.scale *= 1.22;
     }
@@ -1855,6 +1856,9 @@ class Enemy {
     this.chargeT = 0;
     this.diveD = 0;          // 本次俯冲已飞距离
     this.diveMax = 0;        // 冲到这个距离就算到位（按锁定时的间距算）
+    /* 俯冲次数上限：普通机 def.dives、精英机 def.eliteDives。没配就是不限次数，
+     * 别默认 0——那会让"忘记配置"变成"一出生就离场"，这种静默失效最难查。 */
+    this.diveLeft = this.elite ? (def.eliteDives || def.dives || Infinity) : (def.dives || Infinity);
     this.cvx = 0;
     this.cvy = 0;
     this.active = true;
@@ -2036,10 +2040,10 @@ class Enemy {
         break;
 
       /* 虫子（电鳗）：常态正弦爬行，玩家靠近就蓄力扑上来。
-       * 四段：0 爬行 → 1 蓄力 0.42s（原地抖动，给反应窗口）→ 2 直冲 1s
-       * → 3 回气 1s（上浮、机头回正），之后只要玩家还在 diveR 里就再扑一次。
-       * 刻意不设次数上限：它一只追着咬，玩家就得换位而不是站桩清屏。
-       * 唯一的自然出口是"玩家死了/被带到屏幕底边"——那时才顺着洋流离场。 */
+       * 四段：0 爬行 → 1 蓄力 0.42s（原地抖动，给反应窗口）→ 2 直冲
+       * → 3 回气 1s（上浮、机头回正），还有次数就再扑，次数用完顺着洋流离场。
+       * 上限按 def.dives 走（精英用 eliteDives）：3.57 曾不设限，结果它贴着咬到死，
+       * 玩家除了"先清掉它"没有第二种解法，节奏太赖。 */
       case 'worm': {
         if (this.chargeState === 0) {
           this.y += this.speed * dt;
@@ -2057,6 +2061,7 @@ class Enemy {
           if (this.chargeT <= 0) {
             this.chargeState = 2;
             this.chargeT = 1.0;
+            this.diveLeft--;                               // 蓄力结束、真的冲出去才记账
             const a = Math.atan2(p.y - this.y, p.x - this.x);
             const sp = this.def.diveSpeed || 430;
             this.cvx = Math.cos(a) * sp;
@@ -2088,12 +2093,12 @@ class Enemy {
           this.y = Math.max(this.y, PLAY_TOP + 40);
           this.rot = 0;
           if (this.chargeT <= 0) {
-            if (p.alive && this.y < VIEW.h - 60) {
+            if (this.diveLeft > 0 && p.alive && this.y < VIEW.h - 60) {
               this.chargeState = 0;
               this.baseX = clamp(this.x, 62, VIEW.w - 62);  // 摆幅 62，夹住才不会半个身子在屏外
               this.phase = -this.t * 2.2;                   // 正弦从 0 起步，复位瞬间不会横跳 62px
             } else {
-              this.chargeState = 4;                        // 玩家没了 / 已到屏幕底边 → 离场
+              this.chargeState = 4;                        // 次数用完 / 玩家没了 / 到屏幕底边 → 离场
             }
           }
         } else {
@@ -2588,6 +2593,21 @@ class Enemy {
         ctx.arc(this.x, this.y, this.r * 1.45, a0, a0 + 0.45);
         ctx.stroke();
       }
+      ctx.restore();
+    }
+
+    /* 机型光环（def.aura）：高级电鳗用青环，和精英的金环分工明确——
+     * 三档同族单位一眼分得开：无环 = 普通 / 青环 = 高级 / 金环 = 精英。
+     * 只画细环不加填充，否则和护盾、蓄力环糊在一起。 */
+    if (this.def.aura) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.22 + Math.sin(this.t * 3.4) * 0.08;
+      ctx.strokeStyle = this.def.aura;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r * 1.3, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.restore();
     }
 
