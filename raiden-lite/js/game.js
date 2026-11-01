@@ -1610,20 +1610,34 @@ class Game {
     });
   }
 
-  /** 追踪弹用：找最近的敌机或 BOSS */
-  nearestEnemy(x, y) {
-    let best = null;
-    let bd = Infinity;
+  /** 最近的敌机。
+   *  `asker` 只给追踪弹传：把"已被其它追踪弹锁定"的目标排到后面，
+   *  让同一轮几颗弹各追各的（3.65）。没有可换的目标时才回到最近的——
+   *  场上只剩一只时不必硬凑，重叠命中本来就是正常结算。
+   *  不传 asker 就是纯粹"最近"，行为和以前一致。 */
+  nearestEnemy(x, y, asker) {
+    let taken = null;
+    if (asker) {
+      for (const b of this.bullets) {
+        if (b === asker || !b.active || !(b.homing > 0) || !b.target) continue;
+        (taken || (taken = new Set())).add(b.target);
+      }
+    }
+    let best = null, bd = Infinity;   // 未被占用里最近的
+    let alt = null, ad = Infinity;    // 全被占用时的兜底
     for (const e of this.enemies) {
       if (!e.active) continue;
       const d = dist2(x, y, e.x, e.y);
+      if (d < ad) { ad = d; alt = e; }
+      if (taken && taken.has(e)) continue;
       if (d < bd) { bd = d; best = e; }
     }
     if (this.bossActive && !this.boss.dead) {
       const d = dist2(x, y, this.boss.x, this.boss.y);
-      if (d < bd) best = this.boss;
+      if (d < ad) { ad = d; alt = this.boss; }
+      if (!(taken && taken.has(this.boss)) && d < bd) { bd = d; best = this.boss; }
     }
-    return best;
+    return best || alt;
   }
 
   spawnEnemyBullet(x, y, vx, vy, opt) {

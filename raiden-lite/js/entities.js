@@ -2,6 +2,11 @@
  * entities.js —— 子弹 / 粒子 / 拾取物 / 玩家 / 敌机 / BOSS
  * ============================================================ */
 
+/* 敌机实例的出生序号（3.65）。追踪弹靠它判断"锁住的还是不是原来那一只"：
+ * Enemy 是池对象，一只被打掉后会被**立刻复用**成新敌机，只比对引用会把
+ * 复用后的新单位当成旧目标继续追，表现为子弹突然拐个大弯飞向别处。 */
+let ENEMY_SPAWN_SEQ = 0;
+
 class Bullet {
   constructor() {
     this.active = false;
@@ -32,6 +37,11 @@ class Bullet {
     this.ay = opt.ay || 0;          // 纵向加速度（抛石类弹幕用）
     this.pierce = !!opt.pierce;     // 穿透弹（激光）
     this.homing = opt.homing || 0;  // 追踪转向速率 rad/s
+    /* 锁定目标（3.65）：发射时选一次、之后一路追到底，不再是"每帧找最近"。
+     * 池对象字段，必须复位——否则复用时会带着上一颗弹的目标引用先飞一帧。
+     * targetSeq 用来识别"目标已被击破、池对象又被复用成新的一只"。 */
+    this.target = null;
+    this.targetSeq = 0;
     this.boom = opt.boom || null;   // 命中后的范围爆炸 { r, dmg }
     this.fuse = opt.fuse === undefined ? 0 : opt.fuse;  // 引信：到时炸开
     this.chain = opt.chain || 0;    // 电弧链式跳数
@@ -85,9 +95,18 @@ class Bullet {
       }
     }
 
-    // 追踪：朝最近的敌机转向
+    /* 追踪：**发射时锁一个目标，之后一路追到它消失**。
+     * 3.65 之前是每帧取"当前最近的敌机"——同一次开火的两三颗弹从同一个
+     * 机头射出、锁的是同一只，视觉上叠成一坨；目标在弹道侧面掠过时还会
+     * 让弹"反复改主意"，看起来在抖。现在锁定后不再重算，只有目标被击破
+     * 才换下一个（nearestEnemy 会避开别的追踪弹已锁的目标，见 game.js）。 */
     if (this.homing > 0 && game) {
-      const t = game.nearestEnemy(this.x, this.y);
+      let t = this.target;
+      if (t && (t.seq !== this.targetSeq || !t.active || t.dead)) { this.target = null; t = null; }
+      if (!t) {
+        this.target = t = game.nearestEnemy(this.x, this.y, this);
+        this.targetSeq = t ? t.seq : 0;
+      }
       if (t) {
         const cur = Math.atan2(this.vy, this.vx);
         const want = Math.atan2(t.y - this.y, t.x - this.x);
@@ -1741,6 +1760,7 @@ class Enemy {
     opt = opt || {};
     const def = ENEMY_DEFS[kind];
     const sz = Assets.size(def.sprite);
+    this.seq = ++ENEMY_SPAWN_SEQ;   // 追踪弹靠它识别"这只还是不是原来那一只"
     this.kind = kind;
     this.def = def;
     this.sprite = def.sprite;
@@ -2867,6 +2887,7 @@ class Boss {
   }
 
   init(stage) {
+    this.seq = ++ENEMY_SPAWN_SEQ;   // 和 Enemy 共用一套序号，追踪弹不必分类型判断
     this.stage = stage;
     this.sprite = stage.boss;
     this.name = stage.bossName;
