@@ -867,8 +867,7 @@ class Game {
         this.rearmToastT = 1.8;
         for (const d of b.drones) {
           if (!d.alive) continue;
-          this.explode(b.x + Math.cos(d.ang) * d.r, b.y + Math.sin(d.ang) * d.r,
-            0.7, '#ffd166', 10);
+          this.explode(d.x, d.y, 0.7, '#ffd166', 10);
         }
       }
     }
@@ -1002,32 +1001,20 @@ class Game {
     }
     /* 3) BOSS：本体按轮廓判定吃固定伤害；可破坏部件与浮游炮单独结算。
      * 以前这里只打本体，玩家看着爆炸圈把两侧炮台整个罩住、炮台血条纹丝不动
-     * （3.39 修）。判定半径沿用子弹命中那一套（部件 pt.r、浮游炮 13），
-     * 浮游炮的坐标也必须和子弹路径一样夹在 36~W-36，否则贴边时会打空。 */
+     * （3.39 修）。判定半径沿用子弹命中那一套（部件 pt.r、浮游炮 13）；
+     * 坐标走 `pt.x / d.x` 的 getter（3.66），浮游炮的 36~W-36 夹边也在里面，
+     * 不再各写一份。 */
     if (this.bossActive && !this.boss.dead && !this.boss.invuln) {
       const bo = this.boss;
       for (const pt of bo.parts) {
         if (!pt.alive) continue;
-        const px = bo.x + pt.dx, py = bo.y + pt.dy;
-        if (dist2(b.x, b.y, px, py) > (R + pt.r) * (R + pt.r)) continue;
-        pt.hp -= PLAYER.bombBossDmg;
-        pt.flash = 0.08;
-        if (pt.hp <= 0) {
-          pt.alive = false;
-          this.onBossPartDestroyed(bo, pt);
-        }
+        if (dist2(b.x, b.y, pt.x, pt.y) > (R + pt.r) * (R + pt.r)) continue;
+        bo.damageSub(pt, PLAYER.bombBossDmg, this);
       }
       for (const d of bo.drones) {
         if (!d.alive) continue;
-        const px = clamp(bo.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
-        const py = bo.y + Math.sin(d.ang) * d.r;
-        if (dist2(b.x, b.y, px, py) > (R + 13) * (R + 13)) continue;
-        d.hp -= PLAYER.bombBossDmg;
-        d.flash = 0.08;
-        if (d.hp <= 0) {
-          d.alive = false;
-          this.onDroneDestroyed(bo, d, px, py);
-        }
+        if (dist2(b.x, b.y, d.x, d.y) > (R + 13) * (R + 13)) continue;
+        bo.damageSub(d, PLAYER.bombBossDmg, this);
       }
       // 本体放在部件之后：hit() 可能直接把 BOSS 打死并触发结算流程。
       // raw：保险是反制手段，不该被轮转护盾吃掉（挡弹只针对普通子弹）。
@@ -1151,6 +1138,39 @@ class Game {
    *  `falloff` / `minDmg` 衰减、`color` / `life` 视觉。
    *  缺省值就是电弧炮原来的行为（175px、每跳 -0.6、最低 0.8）——
    *  动缺省值会让 tesla 的手感跟着漂，新武器一律靠 opt 覆盖。 */
+  /** 雷电 / 电弧可命中的最近目标（3.66）。
+   *  以前只扫 `enemies`，于是临时雷电在 BOSS 战没有小怪时**一次都不触发**——
+   *  它以为"周围没有敌人"，玩家看到的是这件道具捡了等于没捡。
+   *  BOSS 本体和它的可破坏部件一起进候选：雷电是攻击手段，打在舰体上就该掉血。
+   *
+   *  `chained` 是已经跳过的目标，同一个目标不会被劈两次。
+   *  出场保护（invuln）的 BOSS 整组排除：`Boss.hit()` 和 `damageSub()` 不做
+   *  这一层拦截的兜底，靠的就是"选目标时就别选它"，免得跳数被浪费在打不动的机体上。 */
+  nearestChainTarget(x, y, range, chained) {
+    chained = chained || [];
+    let best = null;
+    let bd = range * range;
+    for (const e of this.enemies) {
+      if (!e.active || chained.indexOf(e) >= 0) continue;
+      if (e.entryImmune || e.spawnGuard > 0) continue;   // 别把跳数浪费在幕布后面的敌机上
+      const d = dist2(x, y, e.x, e.y);
+      if (d < bd) { bd = d; best = e; }
+    }
+    if (this.bossActive && !this.boss.dead && !this.boss.invuln) {
+      const bo = this.boss;
+      for (const t of bo.subs) {
+        if (!t.active || chained.indexOf(t) >= 0) continue;
+        const d = dist2(x, y, t.x, t.y);
+        if (d < bd) { bd = d; best = t; }
+      }
+      if (chained.indexOf(bo) < 0) {
+        const d = dist2(x, y, bo.x, bo.y);
+        if (d < bd) { bd = d; best = bo; }
+      }
+    }
+    return best;
+  }
+
   chainLightning(x, y, exclude, hops, dmg, opt) {
     const o = opt || {};
     const radius = o.radius || 175;
@@ -1164,21 +1184,17 @@ class Game {
     let power = dmg;
     for (let k = 0; k < hops; k++) {
       let best = (k === 0 && o.first) ? o.first : null;
-      if (best) {
-        chained.push(best);
-      } else {
-        let bd = (k === 0 ? firstR : radius) * (k === 0 ? firstR : radius);
-        for (const e of this.enemies) {
-          if (!e.active || chained.indexOf(e) >= 0) continue;
-          if (e.entryImmune || e.spawnGuard > 0) continue;   // 别把跳数浪费在幕布后面的敌机上
-          const d = dist2(px, py, e.x, e.y);
-          if (d < bd) { bd = d; best = e; }
-        }
+      if (!best) {
+        best = this.nearestChainTarget(px, py, k === 0 ? firstR : radius, chained);
         if (!best) break;
-        chained.push(best);
       }
+      chained.push(best);
       this.arcs.push({ x1: px, y1: py, x2: best.x, y2: best.y, life, max: life, c: o.color });
-      best.hit(power, null, this);
+      /* 签名不统一：`Enemy.hit(dmg, bullet, game)` 与 `Boss.hit(dmg, game)` 是两套，
+       * 给本体照传 null 会把 game 顶成子弹参数。部件的 `hit` 特意做成与 Enemy
+       * 同构，所以只有本体需要分叉。 */
+      if (best === this.boss) best.hit(power, this);
+      else best.hit(power, null, this);
       px = best.x;
       py = best.y;
       power = Math.max(minDmg, power - falloff);
@@ -1614,7 +1630,12 @@ class Game {
    *  `asker` 只给追踪弹传：把"已被其它追踪弹锁定"的目标排到后面，
    *  让同一轮几颗弹各追各的（3.65）。没有可换的目标时才回到最近的——
    *  场上只剩一只时不必硬凑，重叠命中本来就是正常结算。
-   *  不传 asker 就是纯粹"最近"，行为和以前一致。 */
+   *  不传 asker 就是纯粹"最近"，行为和以前一致。
+   *
+   *  3.66 起 BOSS 的可破坏部件（炮塔 / 浮游炮）也进候选池，跟本体按距离
+   *  一起比——不额外给权重：炮塔在舰体两侧，玩家从侧翼打时它本来就更近，
+   *  自动武器自然会去拆；在正下方时中心仍更近，输出不会被抢走。
+   *  以前只看 `enemies`，追踪弹在 BOSS 战里永远只锁舰体中心。 */
   nearestEnemy(x, y, asker) {
     let taken = null;
     if (asker) {
@@ -1633,9 +1654,17 @@ class Game {
       if (d < bd) { bd = d; best = e; }
     }
     if (this.bossActive && !this.boss.dead) {
-      const d = dist2(x, y, this.boss.x, this.boss.y);
-      if (d < ad) { ad = d; alt = this.boss; }
-      if (!(taken && taken.has(this.boss)) && d < bd) { bd = d; best = this.boss; }
+      const bo = this.boss;
+      for (const t of bo.subs) {
+        if (!t.active) continue;
+        const d = dist2(x, y, t.x, t.y);
+        if (d < ad) { ad = d; alt = t; }
+        if (taken && taken.has(t)) continue;
+        if (d < bd) { bd = d; best = t; }
+      }
+      const d = dist2(x, y, bo.x, bo.y);
+      if (d < ad) { ad = d; alt = bo; }
+      if (!(taken && taken.has(bo)) && d < bd) { bd = d; best = bo; }
     }
     return best || alt;
   }
@@ -2795,8 +2824,8 @@ class Game {
     if (includeParts === false) return false;
     for (const pt of bo.parts) {
       if (!pt.alive) continue;
-      const dx = x - (bo.x + pt.dx);
-      const dy = y - (bo.y + pt.dy);
+      const dx = x - pt.x;
+      const dy = y - pt.y;
       const rr = pt.r + r;
       if (dx * dx + dy * dy < rr * rr) return true;
     }
@@ -2959,19 +2988,18 @@ class Game {
         let hitPart = false;
         for (const pt of bo.parts) {
           if (!pt.alive) continue;
-          const px = bo.x + pt.dx, py = bo.y + pt.dy;
-          if (dist2(b.x, b.y, px, py) < (pt.r + b.r) * (pt.r + b.r)) {
+          /* 坐标走 `pt.x/pt.y`（getter，跟着舰体走），与自动武器的选目标
+           * 完全同一口径——两处各写一份 `bo.x + pt.dx` 迟早会漂。 */
+          if (dist2(b.x, b.y, pt.x, pt.y) < (pt.r + b.r) * (pt.r + b.r)) {
             b.active = false;
-            pt.hp -= b.dmg;
-            pt.flash = 0.08;
-            if (pt.hp <= 0) {
-              pt.alive = false;
-              this.onBossPartDestroyed(bo, pt);
-            }
+            bo.damageSub(pt, b.dmg, this);
             this.addParticle(b.x, b.y, {
               vx: rand(-40, 40), vy: rand(-70, -10), life: 0.25, r: 4, color: '#ffe38a'
             });
             SFX.hit();
+            /* 爆炸弹打炮塔也要炸：追踪弹的爽感有一半来自那圈爆炸，
+             * 打在本体上炸、打在炮塔上只是"噗"一下，玩家会以为炮塔不算命中。 */
+            if (b.boom) this.plasmaBoom(b, null);
             hitPart = true;
             break;
           }
@@ -2982,22 +3010,16 @@ class Game {
         let hitDrone = false;
         for (const d of bo.drones) {
           if (!d.alive) continue;
-          const px = clamp(bo.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
-          // 注意：不要在这里加纵向压缩。绘制、开火、退场爆炸全都用 sin*r，
-          // 只有这一行曾经多乘了 0.62，导致判定比炮台实体高 40~67px，玩家打不中。
-          const py = bo.y + Math.sin(d.ang) * d.r;
-          if (dist2(b.x, b.y, px, py) < (13 + b.r) * (13 + b.r)) {
+          // 坐标 getter 里已经带了 clamp（与绘制、开火一致）；
+          // 不要在这里加纵向压缩——曾经多乘 0.62，判定比实体高 40~67px
+          if (dist2(b.x, b.y, d.x, d.y) < (13 + b.r) * (13 + b.r)) {
             b.active = false;
-            d.hp -= b.dmg;
-            d.flash = 0.08;
-            if (d.hp <= 0) {
-              d.alive = false;
-              this.onDroneDestroyed(bo, d, px, py);
-            }
+            bo.damageSub(d, b.dmg, this);
             this.addParticle(b.x, b.y, {
               vx: rand(-40, 40), vy: rand(-70, -10), life: 0.25, r: 4, color: '#ffe38a'
             });
             SFX.hit();
+            if (b.boom) this.plasmaBoom(b, null);
             hitDrone = true;
             break;
           }
@@ -4282,15 +4304,13 @@ class Game {
 
       for (const pt of bo.parts) {
         if (!pt.alive) continue;
-        ring(bo.x + pt.dx, bo.y + pt.dy, pt.r, 'rgba(214,177,255,1)', 1.3);
+        ring(pt.x, pt.y, pt.r, 'rgba(214,177,255,1)', 1.3);
       }
 
       // 浮游炮：判定半径固定 13
       for (const d of bo.drones) {
         if (!d.alive) continue;
-        const px = clamp(bo.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
-        const py = bo.y + Math.sin(d.ang) * d.r;
-        ring(px, py, 13, 'rgba(125,250,255,1)', 1.2);
+        ring(d.x, d.y, 13, 'rgba(125,250,255,1)', 1.2);
       }
 
       /* 轮转护盾（3.55）：判定在**膜上**（`shieldHitTest`），所以调试层画的是膜

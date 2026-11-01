@@ -880,15 +880,10 @@ class Player {
       /* 雷电和另外两把临时武器的根本区别：**不是"到点就放"**。
        * 它先问"周围有没有敌人"，没有就静默，连音效都不出——
        * 否则满屏都是雷声，玩家分不清"现在真的在打"还是"它自己在响"。
-       * 目标判定只认已经入场的敌机（entryImmune / spawnGuard 豁免），
-       * 和 chainLightning 内部一致，不然第一跳会打在幕布后面的隐形机上。 */
-      let best = null;
-      let bd = C.range * C.range;
-      for (const e of game.enemies) {
-        if (!e.active || e.entryImmune || e.spawnGuard > 0) continue;
-        const d = dist2(this.x, this.y, e.x, e.y);
-        if (d < bd) { bd = d; best = e; }
-      }
+       * 目标判定交给 `nearestChainTarget`（3.66）：BOSS 本体和它的炮塔/浮游炮
+       * 都算目标。以前这里只扫 `enemies`，BOSS 战没有小怪时雷电**一次都不触发**，
+       * 玩家看到的是"这件道具捡了等于没捡"。 */
+      const best = game.nearestChainTarget(this.x, this.y, C.range, null);
       if (!best) return C.retry;
       game.chainLightning(this.x, this.y - 16, null, C.hops, C.dmg, {
         first: best, firstR: C.range, radius: C.jumpR,
@@ -2943,12 +2938,14 @@ class Boss {
     const dHp = dCount ? Math.round(this.maxHp * dRatio / dCount) : 0;
     this.drones = dCount ? Array.from({ length: dCount }, (_, i) => {
       const baseAng = Math.PI / 2 + (i - (dCount - 1) / 2) * 0.54;
-      return {
+      const d = {
         baseAng: baseAng,
         ang: baseAng,
         r: 182, hp: dHp, maxHp: dHp, alive: true,
         fireT: 1.6 + i * 0.7, flash: 0
       };
+      this._makeSubTarget(d, 'drone');
+      return d;
     }) : [];
 
     // 镜像武器 / 弹幕墙 / 引力场
@@ -3025,12 +3022,21 @@ class Boss {
     const pd = (typeof BOSS_PARTS !== 'undefined' && BOSS_PARTS[stage.boss]) || null;
     if (pd) {
       const each = Math.round(this.maxHp * (pd.ratio || 0.5) / pd.items.length);
-      this.parts = pd.items.map(q => ({
-        dx: q.dx, dy: q.dy, r: q.r, hp: each, maxHp: each, alive: true, flash: 0
-      }));
+      this.parts = pd.items.map(q => {
+        const pt = {
+          dx: q.dx, dy: q.dy, r: q.r, hp: each, maxHp: each, alive: true, flash: 0
+        };
+        this._makeSubTarget(pt, 'part');
+        return pt;
+      });
     } else {
       this.parts = [];
     }
+    /* 自动武器（追踪弹 / 雷电）的目标池：炮塔和浮游炮跟敌机、BOSS 本体一样，
+     * 都是"能被打掉、打掉有收益"的东西，但它们不是独立实体，没有 x/y 字段
+     * （坐标是相对舰体的偏移，跟着 BOSS 走）。这里统一包成可锁定目标，
+     * 让 game 层的选目标逻辑只认一套坐标语义。 */
+    this.subs = this.parts.concat(this.drones);
     this.flash = 0;
     this.dead = false;
     this.deathT = 0;
@@ -3542,6 +3548,67 @@ class Boss {
     return n;
   }
 
+  /* ---------------- 可破坏部件的"可被锁定"包装（3.66） ----------------
+   *
+   * 炮塔（parts）和浮游炮（drones）一直是"打掉能削弱火力"的可攻击件，
+   * 直射弹在 `_updateBullets` 里单独判它们，所以手动武器打得到。
+   * 但自动武器（追踪弹、雷电）找目标走的是 `nearestEnemy` / `chainLightning`，
+   * 那两个函数只遍历 `enemies` 数组，于是出现两种怪现象：
+   *   · 追踪弹在 BOSS 战里永远只锁舰体中心，不去拆炮塔
+   *   · 雷电在 BOSS 战没有小怪时**一次都不触发**（周围"没有敌人"）
+   *
+   * 修法不是给这两个函数各加一段 BOSS 分支（那样每加一种自动武器就要改一遍），
+   * 而是把部件包成和敌机同构的目标：有实时坐标、有 seq、有 hit()。
+   *
+   * 坐标必须是 getter，不能是快照：炮塔跟着舰体移动、浮游炮还在公转，
+   * 存成字段的话追踪弹会追着一块残影飞。
+   *
+   * `hostSeq` 是池复用的防线：Boss 是池对象，被换掉之后旧 part 对象仍然
+   * 指着同一个实例，光看 `alive` 会变成"追着一个不存在的炮塔"。
+   */
+  _makeSubTarget(t, kind) {
+    const bo = this;
+    t.subKind = kind;
+    t.seq = ++ENEMY_SPAWN_SEQ;
+    t.hostSeq = bo.seq;
+    Object.defineProperty(t, 'x', {
+      get() {
+        return kind === 'drone'
+          ? clamp(bo.x + Math.cos(t.ang) * t.r, 36, VIEW.w - 36)   // 与判定、绘制同一口径
+          : bo.x + t.dx;
+      }
+    });
+    Object.defineProperty(t, 'y', {
+      get() {
+        return kind === 'drone' ? bo.y + Math.sin(t.ang) * t.r : bo.y + t.dy;
+      }
+    });
+    Object.defineProperty(t, 'active', {
+      get() { return t.alive && t.hostSeq === bo.seq && !bo.dead; }
+    });
+    /* 签名与 Enemy.hit 一致（dmg, bullet, game），这样 chainLightning
+     * 里那句 `best.hit(power, null, this)` 不用为部件写分支。 */
+    t.hit = (dmg, bullet, game) => bo.damageSub(t, dmg, game);
+  }
+
+  /** 部件 / 浮游炮的血量结算。火花与音效留在调用点——那是"子弹打中"的表现，
+   *  雷电这种直接结算的伤害不该凭空多出一圈命中特效。 */
+  damageSub(t, dmg, game) {
+    if (!t.active) return false;
+    /* 出场保护期打不动：雷电是直接结算，绕过了 `_updateBullets` 里那层
+     * invuln 拦截，所以这道门必须开在结算点上。 */
+    if (this.invuln) return false;
+    t.hp -= dmg;
+    t.flash = 0.08;
+    if (t.hp <= 0) {
+      t.hp = 0;
+      t.alive = false;
+      if (t.subKind === 'drone') game.onDroneDestroyed(this, t, t.x, t.y);
+      else game.onBossPartDestroyed(this, t);
+    }
+    return true;
+  }
+
   /** 轮转护盾的膜：半径与绘制共用这一对 getter。
    *  以前判定挂在本体轮廓（`_bossHits`）上、膜却画在 0.46 的椭圆上，
    *  两者差 40 多像素——子弹要穿进机体里才被拦。 */
@@ -3732,8 +3799,8 @@ class Boss {
     // ---- 浮游炮 ----
     for (const d of this.drones) {
       if (!d.alive) continue;
-      const px = clamp(this.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
-      const py = this.y + Math.sin(d.ang) * d.r;
+      const px = d.x;   // getter 里已含 36~W-36 夹边，与判定同口径
+      const py = d.y;
 
       // 与本体连线
       ctx.save();
@@ -3965,8 +4032,9 @@ class Boss {
   _drawParts(ctx) {
     for (const pt of this.parts) {
       if (!pt.alive) continue;
-      const x = this.x + pt.dx;
-      const y = this.y + pt.dy;
+      // 坐标走 getter（3.66），与判定、自动武器选目标完全同一口径
+      const x = pt.x;
+      const y = pt.y;
       const accent = this.stage.accent;
 
       // 外发光

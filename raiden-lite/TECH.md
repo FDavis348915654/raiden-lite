@@ -285,6 +285,8 @@ zip -qr raiden-lite-<V>.zip raiden-lite -x "*/__pycache__/*" "*.png.bak"
 
 BOSS 的可破坏部件（`BOSS_PARTS`）与本体是**两条独立血条**：子弹命中先判部件圆、命中即 `continue`，所以打炮台一点本体伤害都落不到；3.49 起在 `onBossPartDestroyed()` 里补一笔本体伤害（`bossPartKillRatio`），并走 `boss.hit(..., { raw: true })` 跳过护盾轮转——它是"炮塔爆炸撕开舰体"，不是一次命中。同一条回调也被保险（`_bombBoom`）复用，所以一颗雷清掉两门会同时拿到 16% 与 `bombBossDmg`。
 
+部件与浮游炮在 3.66 被包成**可被自动武器锁定的子目标**（`Boss._makeSubTarget`）：`x`/`y` 是 getter（跟着舰体走、浮游炮还带 36~W-36 夹边），`seq` 唯一、`hostSeq` 挡住池复用，`hit(dmg, bullet, game)` 与 `Enemy` 同构。汇总在 `boss.subs`，供 `nearestEnemy` 与 `nearestChainTarget` 扫描。以前自动武器只遍历 `enemies`，于是追踪弹永远打不到炮塔、雷电在 BOSS 战零触发。三条扣血路径（子弹、保险、雷电）统一走 `Boss.damageSub()`，`invuln` 只在那里判一次。
+
 BOSS 轮转护盾（`boss3`）的挡弹判定在**膜上**，不在本体轮廓上（3.55，`Boss.shieldHitTest`）：膜半径走 `shieldRx = w*0.46` / `shieldRy = h*0.46`，与绘制共用同一对 getter；子弹**跨过膜的那一帧**就被拦下（用 `Bullet.px/py` 记的上一帧位置判，不是"走到膜内就挡"——后者会把从缺口穿进来的子弹在后续某帧补判成命中盾）。判定顺序放在部件与本体之前，因为膜是最外层、炮口也在膜内。
 
 配套的三条：①`Boss.hit()` 里**不再**有按玩家坐标兜底的挡弹判定——它和命中点坐标会打架（玩家横移后，从缺口打进去的子弹被按当前方向补判成挡下），挡弹完全由拿得到真实命中点的两处负责（`_collide` 的子弹路径、`_fireLaser` 的光束路径）；②视觉必须"亮 = 有盾 = 打不进"——3.53 的挡面用的是 `stage.accent`，深海主题下比缺口那圈白虚线还暗，玩家把缺口当成了盾，机制就白做了；③挡弹反馈（火花、涟漪、该段弧闪白）要落在膜面上，把越膜那一帧的位移按归一化距离除回去，否则弹开点会比膜"陷进去"半个身位。
