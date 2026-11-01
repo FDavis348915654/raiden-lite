@@ -74,11 +74,13 @@ node /root/.codebuddy/skills/sites/scripts/publish.js --dir /workspace/raiden-li
 
 ## Git 约定
 
-- **每次执行任务前先同步：`git pull --rebase --autostash origin main`**。这个工程会在多台电脑上开发，不先同步就会在旧代码上动手，提交时还得手工解冲突。即使只是"看一眼""调个数值"也要先拉；连续多轮对话时，间隔较久（换机器、隔天）也要再拉一次
-  - 标准动作：`git fetch origin` → 看 `git status -sb` 有没有 divergence → 落后就 `pull --rebase --autostash` → 再开工
-  - 工作区脏也能拉（`--autostash` 会自动存一把再恢复），但**拉之前先看 `git status --porcelain`**：本地有未完成的改动时，先确认这些改动与远端不冲突，别让 autostash 把半截代码藏起来
-  - 拉下来是**只读同步**，不产生任何提交；冲突时**停下来报告给 Davis**，不要自行 `reset` / `checkout` / 手工合并后默默提交
-- **拉完先看 `VERSION` 和 `index.html` 的 8 处 `?v=`**：另一台机器可能已经发过版。远端比本地高就顺着往上加，不要回退版本号；两边同时升到同一个号时，后提交的一方要改成更高的那个（`grep -c '?v=<版本>' index.html` 必须等于 8）
+- **默认不每次任务前同步**（3.62 起）：主开发就在这台云端机（`/workspace`），单机连续开发时每轮 `git pull` 是纯开销，而且 `--autostash` 会把没写完的改动藏一把再恢复，反而容易踩。只在下面这几种情况先 `git sync`（= `pull --rebase --autostash`，仓库已有这个别名）：
+  - 用户说"另一台机器上改了 / 先更新 / 同步一下"
+  - 间隔较久（隔天、几天后重新开工）
+  - **准备提交（用户说"备份"）之前——这一步必做**，否则推送会被拒，或者推上去才发现远端有新提交
+  - `git status -sb` 里出现 `[behind N]`
+- **同步是只读的，不产生提交**；工作区脏也能拉，但拉之前先看 `git status --porcelain`，确认本地改动与远端不冲突。冲突时**停下来报告给 Davis**，不要自行 `reset` / `checkout` / 手工合并后默默提交
+- **发版与提交前核对 `VERSION` 和 `index.html` 的 8 处 `?v=`**：另一台机器可能已经发过版。远端比本地高就顺着往上加，不要回退版本号；两边同时升到同一个号时，后提交的一方改成更高的那个（`grep -c '?v=<版本>' index.html` 必须等于 8）
 - **只在用户说"备份"时提交**，平时改代码不乱 commit
 - 提交作者固定：`FDavis348915654 <348915654@qq.com>`
 - 推送用沙箱里的 SSH deploy key，**只对这一个仓库有权限**
