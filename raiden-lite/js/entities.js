@@ -767,20 +767,27 @@ class Player {
    * 计时统一在这里推进，到期清空并通知 game 播一次提示，免得"道具突然没了"。
    */
 
-  /** 吃 S：护盾。重复吃 → 时间与耐久都补满，不叠加 */
+  /** 吃 S：护盾。重复吃 → **时间累加（封顶 `maxDur`）+ 耐久补满**。
+   *  耐久不累加：它的单位是"颗"，叠到 60 发等于把"什么时候该冲"变成"随便冲"，
+   *  时长可以叠、强度不能叠。 */
   gainShield(game) {
     const C = TEMP.shield;
-    this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0, jit: 0 };
+    if (this.shield) {
+      this.shield.t = Math.min(C.maxDur, this.shield.t + C.dur);
+      this.shield.hp = C.hp;
+    } else {
+      this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0, jit: 0 };
+    }
     game.onTempGain(this, 'shield');
   }
 
   /** 吃 T / D / Z：临时武器。三把**可以同时在手**（3.47），
-   *  重复吃同一把 → 只刷新时间与冷却，不叠加、不新建第二条。 */
+   *  重复吃同一把 → **时间累加（封顶 `maxDur`）**、冷却压到最短，不新建第二条。 */
   gainTempWpn(game, id) {
     const C = TEMP[id];
     const cur = this._tempWpnOf(id);
     if (cur) {
-      cur.t = C.dur;
+      cur.t = Math.min(C.maxDur, cur.t + C.dur);
       cur.cd = Math.min(cur.cd, 0.1);
     } else {
       this.tempWpns.push({ id, t: C.dur, cd: 0.1 });
@@ -794,15 +801,14 @@ class Player {
     return null;
   }
 
-  /** 吃 A：临时僚机。已在场时再吃 → 刷新时间，并补一段无敌
+  /** 吃 A：临时僚机。已在场时再吃 → 时间累加（封顶 `maxDur`），并补一段无敌
    *  （和正式僚机满员吃 O 同待遇：冗余的僚机道具别只剩"刷新计时"这一件事） */
   gainTempAlly(game) {
-    const t = TEMP.ally.dur;
     if (this.tempAlly) {
-      this.tempAlly.t = t;
+      this.tempAlly.t = Math.min(TEMP.ally.maxDur, this.tempAlly.t + TEMP.ally.dur);
       this.invuln = Math.max(this.invuln, PLAYER.optionInvuln);
     } else {
-      this.tempAlly = { t, x: this.x, y: this.y + TEMP.ally.oy, slotT: 0.12 };
+      this.tempAlly = { t: TEMP.ally.dur, x: this.x, y: this.y + TEMP.ally.oy, slotT: 0.12 };
     }
     game.onTempGain(this, 'ally');
   }
@@ -818,7 +824,7 @@ class Player {
       if (sh.t <= 0 || sh.hp <= 0) {
         /* 被打穿 ≠ 时间到（3.45）：只有"耐久没了但时间还在"才算打穿，
          * 这时补一口血。时间到就正常消失，不给白送的血——
-         * 否则玩家会把护盾当成"35 秒后的回血包"，主动留着不打弹。 */
+         * 否则玩家会把护盾当成"dur 秒后的回血包"，主动留着不打弹。 */
         const broke = sh.hp <= 0 && sh.t > 0;
         this.shield = null;
         if (broke && TEMP.shield.breakHeal > 0) {
@@ -1785,6 +1791,42 @@ class Enemy {
      * 只改 def 的话这些分支还读着旧值，表现为"配了没生效"。 */
     this.fireCd = opt.fire || def.fire || 0;
     this.fireT = this.fireCd ? rand(0.7, this.fireCd) : 999;
+    /* 敌机激光（3.68）：模式参数取 ENEMY_LASER.modes[mode]，机型可以逐字段覆盖
+     * （laser.fire / width / dmg / charge），这样"某只的光柱更粗"不用改全局档位。
+     *
+     * **池对象，五个字段必须逐项复位**：laserState 留成 2 会让新复用的敌机
+     * 一出生就顶着上一只的光柱（判定还真的算数）；laserCd 留成负数会立刻开火。
+     * 冷却起点给随机：同批轰炸机同时进屏时，一起蓄力会变成一排同时落下的栅栏，
+     * 读不出"谁在瞄我"。 */
+    /* `laser.from` 是**激光的解锁关**（3.69）：同一只机型可以在前面几关登场，
+     * 但不带光柱。不这么做的话，第 1 关的轰炸机就会放竖线——玩家还在学
+     * "怎么把飞机开对地方"，同时要读三条弹幕来源和一条封锁线，第一关直接劝退。
+     *
+     * 判据写成"关卡信息缺失就放行"（`!opt.stage || !def.laser.from`）：
+     * BOSS 召唤的援军、测试脚本直接 `init()` 都不传 stage，那些路径要维持
+     * 原本行为；只有主生成路径 `_spawnEnemy` 会传，配置才真正生效。
+     * 反过来"缺省按第 1 关算"会让所有没传 stage 的调用静默失去激光。 */
+    const unlocked = !def.laser ? false
+      : (!opt.stage || !def.laser.from || opt.stage >= def.laser.from);
+    const ml = unlocked ? ENEMY_LASER.modes[def.laser.mode] : null;
+    this.laserCfg = ml ? Object.assign({}, ml, def.laser) : null;
+    this.laserState = 0;      // 0 空闲 / 1 蓄力 / 1.5 锁定 / 2 发射
+    this.laserT = 0;
+    this.laserAng = Math.PI / 2;
+    this.laserCd = 0;
+    if (this.laserCfg) {
+      const lcd = this.laserCfg.cd || 6;   // 没配冷却也能量出来，别留 NaN（NaN 比较恒 false = 永不冷却）
+      /* 首发冷却（3.71）：原来取 `rand(0.45cd, cd)`——狙击机 cd 7.6 秒，
+       * 最快也要 3.4 秒后才开始蓄力，再加蓄力锁定发射 1.6 秒，5 秒才见光；
+       * 而它从出生到能被玩家打到只用 0.9 秒，2.8 秒就被打碎了，
+       * 光柱永远打不出来（实测 90 架里只有 1 架成功发射）。
+       * 改成"1.8 秒 + 0~0.5 秒随机"：一露头两秒内就开始蓄力。
+       * 随机量只用来错开同批几架，避免同时亮成一片栅栏。 */
+      /* 教学波（`opt.intro`）仍用固定初值：首秀的两架要能**同时亮着**
+       * 才有对照——一条在打、一条在预警。随机初值会让两架错开两三秒，
+       * 结果画面里永远只有一条线，"两条并排"等于没做（3.70）。 */
+      this.laserCd = opt.intro ? 1.4 : Math.min(lcd, 1.8) + rand(0, 0.5);
+    }
     this.locked = false;
     this.vx = 0;
     this.vy = 0;
@@ -1859,10 +1901,27 @@ class Enemy {
     const smul = opt.shieldMul === undefined ? 1 : opt.shieldMul;
     this.shieldMax = es ? Math.round(es.hp * smul) : 0;
     this.shieldHp = this.shieldMax;
-    this.shieldDur = es ? es.dur : 0;
-    this.shieldT = es ? es.dur : 0;
+    /* 首发保底（3.71）：带激光的机型，护盾在"第一次蓄力开始"之前打不穿
+     * （停在 1 点，见 hit）。这里同时把护盾时长拉到覆盖首发光柱——
+     * 否则计时先到、盾自然消散，保底也就跟着没了。 */
+    this.shieldHoldFirst = !!(es && es.holdFirst && this.laserCfg);
+    let sdur = es ? es.dur : 0;
+    if (this.shieldHoldFirst) {
+      const lc = this.laserCfg;
+      sdur = Math.max(sdur,
+        this.laserCd + (lc.charge || 0.6) + (lc.lock || 0.2) + (lc.fire || 0.5) + 0.4);
+    }
+    this.shieldDur = sdur;
+    this.shieldT = sdur;
     this.shieldHit = 0;      // 吸收伤害后的白闪
     this.shieldBreak = 0;    // 破盾瞬间的爆闪
+    /* 突袭者（3.71）：0 下压 / 1 悬停喷火 / 2 撤离。
+     * 三个状态字段逐项复位——池对象复用会带着上一只的进度，
+     * 表现为"刚出生就在喷火"或"直接倒着往上飞"。 */
+    this.raidState = 0;
+    this.raidT = 0;
+    this.raidBurst = 0;
+    this.raidY = opt.raidY === undefined ? 300 : opt.raidY;
     // 冲角型小 BOSS：0 巡游 / 1 锁定 / 2 俯冲 / 3 归位
     this.ramState = 0;
     this.ramT = 0;
@@ -1966,6 +2025,11 @@ class Enemy {
     }
 
     const p = game.player;
+    /* 激光蓄力/发射期间要压住机身（见下面的回写），先把 AI 跑之前的坐标记下来。
+     * 用"把本帧位移缩到 hold 倍"而不是去改每个 AI 分支的移动量：
+     * 这些分支各自推位置，逐个改等于九处都要记得这件事，迟早漏一处。 */
+    const holdX = this.x;
+    const holdY = this.y;
 
     switch (this.ai) {
       case 'straight':
@@ -2150,6 +2214,37 @@ class Enemy {
         break;
       }
 
+      /* 突袭者（3.71）：压到悬停高度 → 打四轮扇形弹 → 掉头撤离。
+       * 不在悬停期加横向位移：那近两秒是玩家对着它倾泻火力的窗口，
+       * 让它左右飘会把"能不能在窗口内打掉"变成运气，而不是火力分配。
+       * 喷火节奏用 burst 计数而不是 fireCd——四轮打完就走，
+       * 不需要"冷却"这个概念，也不需要 fireT 参与。
+       * 四轮 × 5 发 = 20 发，1.4 秒打完，之后留 0.5 秒空窗再撤离：
+       * "打完才走"必须留得住，否则玩家读到的是一串没有结尾的弹幕。 */
+      case 'raider':
+        if (this.raidState === 0) {
+          this.y += this.speed * dt;
+          if (this.y >= this.raidY) {
+            this.y = this.raidY;
+            this.raidState = 1;
+            this.raidT = 0;
+          }
+        } else if (this.raidState === 1) {
+          this.raidT += dt;
+          // 每 0.35 秒一轮，第一轮在到位那一帧就打出去
+          if (this.raidBurst < 4 && this.raidT >= this.raidBurst * 0.35) {
+            this.shoot(game, 'fan5');
+            this.raidBurst++;
+          }
+          if (this.raidT >= 1.9) {
+            this.raidState = 2;
+            this.rot = Math.PI;      // 机头翻转向上：撤离要看得出来是"掉头飞走"
+          }
+        } else {
+          this.y -= this.speed * 1.5 * dt;
+        }
+        break;
+
       case 'heavy':
         this.y += this.speed * dt;
         this.x = this.baseX + Math.sin(this.t * 0.5 + this.phase) * 22;
@@ -2238,6 +2333,19 @@ class Enemy {
         break;
     }
 
+    /* 敌机激光（3.68）：状态机排在 AI 之后——瞄准型的角度要用本帧坐标算；
+     * 位移回写排在最后——蓄力/发射期间把机身吸回起点（发射期完全停），
+     * 光柱才会停在一处形成"封锁线"，而不是跟着机身横扫成"扫射"。
+     * 回写在状态推进之后：本帧刚进入蓄力也要立刻停住，否则第一帧仍会滑一小段。 */
+    if (this.laserCfg) {
+      this._laserStep(dt, game);
+      if (this.laserState > 0) {
+        const k = this.laserState === 2 ? 0 : (this.laserCfg.hold || 0);
+        this.x = holdX + (this.x - holdX) * k;
+        this.y = holdY + (this.y - holdY) * k;
+      }
+    }
+
     // 侧向入场结束后把机身姿态平滑转回朝上（0.3 秒内），避免"啪"地一下转过来
     if (this.rotFix > 0) {
       this.rotFix -= dt;
@@ -2307,6 +2415,198 @@ class Enemy {
       }
       SFX.enemyShoot();
     }
+  }
+
+  /** 敌机激光的三段状态机（3.68）。
+   *
+   *  0 空闲 → 1 蓄力（瞄准型缓慢跟随）→ 1.5 锁定（方向冻结 + 白闪）→ 2 发射
+   *
+   *  为什么不复用 `Boss._updateLaser`：那一套和护盾轮转、阶段切换、可破坏部件、
+   *  退场全部缠在一起，硬抽出来会让两边都变脏；这里只有"方向 + 计时"两件事。
+   *  但几条规矩是共通的：
+   *    · 出手资格统一走 `inPlay()`，不在 AI 分支里另写 y 判断（3.51）；
+   *    · 入场/登场保护期间不放——玩家还打不动它，光柱先落下来只会读成"作弊"；
+   *    · 同屏条数有上限（`ENEMY_LASER.max`），否则一排轰炸机各来一条，
+   *      屏幕变成栅栏，那不是"限制走位"而是"没有走位"。
+   */
+  _laserStep(dt, game) {
+    const cfg = this.laserCfg;
+    const p = game.player;
+
+    if (this.laserState === 0) {
+      this.laserCd -= dt;
+      if (this.laserCd > 0) return;
+      if (!p.alive || this.entryImmune || this.spawnGuard > 0) return;
+      /* 但也不能在屏幕最顶上就开（3.71）：那时机身还压在 HUD 血条后面，
+       * 玩家看得见光柱、看不见是谁放的。96px 约是 HUD 下沿，
+       * 机身到这儿基本完整露出，光柱根部也对得上。
+       * 狙击机 60px/s，从出生到 96px 约 2.6 秒，仍远早于它 7 秒的存活期。 */
+      if (this.y < 96) return;
+      /* 出手门槛（3.71）：这里**不再要求 `inPlay()`**（整只进可活动区）。
+       * 光柱和弹幕不是一回事——它是一根从机身垂到屏幕底的线，机身还压在
+       * HUD 后面时玩家照样看得见它封的是哪几列；而弹幕从 HUD 后面冒出来
+       * 就完全读不出枪口在哪（那才是 3.51 要解决的问题）。
+       * 实测差距：狙击机从出生飞到"整只进可活动区"要 4.5 秒，
+       * 而它在满配火力下只活 2.8 秒——光柱永远打不出来。
+       * 门槛收到 `entryImmune`（贴图露出四成 + 缓冲）为止：
+       * 那正是"玩家已经能打到它"的时刻，不会出现"打不动的东西在放光柱"。 */
+
+      /* 两道闸门（3.69）：同形态上限 + 全场总数上限。
+       * 只留总数时，第 6 关十几架狙击机会把 3 个名额全占住——三条会转的
+       * 瞄准线同时在场上，玩家找不到"站着就安全"的那一格。
+       * 同形态上限按压迫强度分（ENEMY_LASER.modes[mode].max）。 */
+      const load = game.enemyLaserLoad(cfg.mode);
+      if (load.total >= ENEMY_LASER.max || load.same >= (cfg.max || ENEMY_LASER.max)) {
+        this.laserCd = 0.5;      // 被限流：半秒后再问，别每帧扫一遍全场
+        return;
+      }
+      this.laserState = 1;
+      this.laserT = cfg.charge;
+      /* 初始方向：瞄准型朝玩家；横向型朝玩家那一侧（side 实际是贯穿线，
+       * 这个角度只影响蓄力光束从哪头亮起）；朝下型固定 +90°。 */
+      if (cfg.mode === 'aim') this.laserAng = Math.atan2(p.y - this.y, p.x - this.x);
+      else if (cfg.mode === 'side') this.laserAng = p.x >= this.x ? 0 : Math.PI;
+      else this.laserAng = Math.PI / 2;
+      SFX.laserCharge();
+      return;
+    }
+
+    if (this.laserState === 1) {
+      this.laserT -= dt;
+      /* 蓄力跟随只有瞄准型会转，速率 cfg.track（rad/s）。
+       * 0.9 rad/s 意味着 0.8 秒最多转 41°：斜着跑能甩开，站着不动一定被咬住。
+       * 这就是"更高级一点"的全部内容——玩家必须读出它在转，再决定往哪让。 */
+      if (cfg.mode === 'aim' && cfg.track > 0 && p.alive) {
+        const want = Math.atan2(p.y - this.y, p.x - this.x);
+        let diff = want - this.laserAng;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        this.laserAng += clamp(diff, -cfg.track * dt, cfg.track * dt);
+      }
+      if (this.laserT <= 0) {
+        this.laserState = 1.5;
+        this.laserT = cfg.lock;
+        SFX.laserLock();
+      }
+      return;
+    }
+
+    if (this.laserState === 1.5) {
+      this.laserT -= dt;
+      if (this.laserT <= 0) {
+        this.laserState = 2;
+        this.laserT = cfg.fire;
+        SFX.laserFire();
+      }
+      return;
+    }
+
+    this.laserT -= dt;
+    if (this.laserT <= 0) {
+      this.laserState = 0;
+      this.laserCd = cfg.cd || 6;
+    }
+  }
+
+  /** 激光线段：绘制、玩家判定、调试线框共用同一份坐标。
+   *
+   *  side 是从机身横贯到屏幕两侧的一整条——"把画面切一刀"才是它存在的意义；
+   *  只朝一侧伸的话，玩家站在另一侧就完全不受影响，等于没放。 */
+  laserSegs() {
+    const cfg = this.laserCfg;
+    if (!cfg || this.laserState <= 0) return null;
+    if (cfg.mode === 'side') return [{ x1: 0, y1: this.y, x2: VIEW.w, y2: this.y }];
+    return [{
+      x1: this.x, y1: this.y,
+      x2: this.x + Math.cos(this.laserAng) * ENEMY_LASER.range,
+      y2: this.y + Math.sin(this.laserAng) * ENEMY_LASER.range
+    }];
+  }
+
+  /** 敌机激光的绘制（3.68）：和 BOSS 激光同一套三段语法，但更细、更短、颜色不同。
+   *
+   *  颜色刻意取橙红而不是关卡色：玩家要能一眼分出"这是杂兵的光柱，可以硬顶"
+   *  和"BOSS 那根又粗又长的得认真躲"。BOSS 用关卡的 accent，这里用固定暖色。
+   *  不建渐变——同屏最多三条，纯色叠层已经够亮，省掉每帧几个 gradient 对象。 */
+  _drawEnemyLaser(ctx) {
+    const cfg = this.laserCfg;
+    if (!cfg || this.laserState <= 0) return;
+    const segs = this.laserSegs();
+    if (!segs) return;
+    const stroke = (w, style, alpha) => {
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = style;
+      ctx.lineWidth = w;
+      for (const s of segs) {
+        ctx.beginPath();
+        ctx.moveTo(s.x1, s.y1);
+        ctx.lineTo(s.x2, s.y2);
+        ctx.stroke();
+      }
+    };
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+
+    if (this.laserState === 1) {
+      /* 蓄力：一根从炮口往外长出来的细线、而且是**虚线**。宽度只到 5px——
+       * 它是"预告方向"，不是"已经在打"，所以不能和发射态一个量级。
+       * 虚线是 3.70 补的：首秀波有两条并排的光柱（一条在打、一条要打），
+       * 两条都是实线时玩家读不出差别，会以为"两列都已经封了"，
+       * 于是不敢从中间那道缝里穿——而那道缝恰恰是唯一能站的地方。 */
+      const k = 1 - this.laserT / cfg.charge;
+      ctx.setLineDash([7, 9]);
+      stroke(1.5 + k * 3.5, '#ff9a5a', 0.30 + k * 0.5);
+      ctx.setLineDash([]);
+      const r = 5 + k * 8;
+      ctx.globalAlpha = 0.5 + k * 0.5;
+      ctx.fillStyle = '#ffd2a8';
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    if (this.laserState === 1.5) {
+      /* 锁定：白闪 + 快速脉动。这一段是玩家唯一的反应窗口，
+       * 所以亮度必须明显高于蓄力，而且"闪"的节奏要快到不像呼吸。 */
+      const k = 1 - this.laserT / cfg.lock;
+      const blink = 0.55 + 0.45 * Math.sin(this.t * 30);
+      stroke(3 + k * 5, '#ff5d5d', (0.35 + k * 0.45) * blink);
+      stroke(1.2 + k * 2, '#ffffff', (0.60 + k * 0.40) * blink);
+      ctx.restore();
+      return;
+    }
+
+    /* 发射：0.1 秒由细变粗，末尾 0.16 秒淡出（和 BOSS 激光一致的做法——
+     * 瞬间消失会像"判定漏了一帧"，快速淡出读作"能量收掉了"）。 */
+    const elapsed = cfg.fire - this.laserT;
+    const grow = Math.min(1, elapsed / 0.10);
+    const w = cfg.width * (0.5 + 0.5 * grow);
+    const fade = this.laserT < 0.16 ? Math.max(0.2, this.laserT / 0.16) : 1;
+
+    /* 四层：外晕（让线在深色背景上有"能量"的外扩）+ 主体 + 暖芯 + 白芯。
+     * 三层的时候线读起来像"贴了张橙色的纸条"，加一层低 alpha 的宽外晕才立起来。 */
+    stroke(w * 1.9, 'rgba(255,90,40,0.55)', 0.26 * fade);
+    stroke(w, 'rgba(255,120,70,0.90)', 0.72 * fade);
+    stroke(w * 0.45, 'rgba(255,225,190,1)', 0.88 * fade);
+    stroke(Math.max(1.5, w * 0.16), '#ffffff', fade);
+
+    // 炮口光晕：两层实心圆，不用渐变
+    ctx.globalAlpha = 0.5 * fade;
+    ctx.fillStyle = 'rgba(255,180,120,0.9)';
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, w * 0.95, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.9 * fade;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, w * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }
 
   /** 双 U 巡航的路径推进（3.54）。
@@ -2555,6 +2855,17 @@ class Enemy {
           });
       }
       if (this.shieldHp > 0) return false;
+      /* 首发保底（3.71）：带激光的机型在**第一次蓄力开始之前**护盾不会被击穿，
+       * 打空就停在 1 点。原因是实测过"光柱永远打不出来"——第 6 关 90 架
+       * 狙击机里只有 1 架成功发射：它从出生到能出手要 4.5 秒，
+       * 而满配火力 2.8 秒就能把它打碎。
+       * 一旦 `laserState >= 1`（开始蓄力）这条就撤掉：蓄力/发射期间照样能被打断，
+       * 否则它就成了一堵"无敌到放完招"的墙——那不是可读，是耍赖。
+       * 视觉在 `draw()` 里单独画一个琥珀色"锁壳"，见 shieldHoldFirst。 */
+      if (this.shieldHoldFirst && this.laserState === 0) {
+        this.shieldHp = 1;
+        return false;
+      }
       this._dropShield(game, true);
       /* 溢出（3.39）：`opt.overflow` 是"破盾后本体最多吃多少比例的血"，
        * 目前只有保险传（bombShieldPass 0.30）。
@@ -2618,13 +2929,15 @@ class Enemy {
 
     /* 机型光环（def.aura）：高级电鳗用青环，和精英的金环分工明确——
      * 三档同族单位一眼分得开：无环 = 普通 / 青环 = 高级 / 金环 = 精英。
-     * 只画细环不加填充，否则和护盾、蓄力环糊在一起。 */
+     * 只画细环不加填充，否则和护盾、蓄力环糊在一起。
+     * 3.71 把亮度从 0.22 提到 0.34 并加粗到 2：突袭者的"金环 = 3600 分"
+     * 是它唯一的价值提示，0.22 在密集弹幕里根本看不见（实测截图里读不出来）。 */
     if (this.def.aura) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.22 + Math.sin(this.t * 3.4) * 0.08;
+      ctx.globalAlpha = 0.34 + Math.sin(this.t * 3.4) * 0.10;
       ctx.strokeStyle = this.def.aura;
-      ctx.lineWidth = 1.4;
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.r * 1.3, 0, Math.PI * 2);
       ctx.stroke();
@@ -2691,6 +3004,10 @@ class Enemy {
     }
 
     Assets.draw(ctx, this.sprite, this.x, this.y, s, 1, this.rot);
+    /* 激光画在贴图**之后**：蓄力期的炮口充能球是玩家唯一能提前看到的信号，
+     * 压在贴图下面等于被自己的机身吃掉。压住机身中间一条也不难看——
+     * 读起来就是"从炮口射出来的"。 */
+    this._drawEnemyLaser(ctx);
     if (this.flash > 0) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
@@ -2708,6 +3025,12 @@ class Enemy {
       const alive = this.shieldHp > 0;
       const k = alive ? this.shieldHp / this.shieldMax : 0;
       const fade = alive ? 1 : clamp(this.shieldBreak / 0.30, 0, 1);
+      /* 锁壳（3.71）：holdFirst 生效时（护盾被压到 1 点、还没开始蓄力），
+       * 壳面从冷青转琥珀并脉动。不加这个表现的话，玩家看到的是
+       * "盾已经空了却一直打不进去"，读起来像 bug；
+       * 琥珀色同时是"它马上要放光柱"的提示，和光柱本身的暖色是同一套语言。 */
+      const locked = alive && this.shieldHoldFirst && this.laserState === 0;
+      const pulse = 0.5 + 0.5 * Math.sin(this.t * 9);
       // 半径取 r 而不是贴图外接盒：护盾是"能量壳"，跟着判定体走才对得上手感。
       // 纵向多给 18%，本作敌机多数是竖着的；正六边形套细长机身会横向撑得比机身宽，
       // 编队密集时十几个六边形连成一片，反而比不加盾更看不清机体。
@@ -2732,14 +3055,22 @@ class Enemy {
       hexPath(R, RY);
       // 破盾瞬间整块转白并淡出，而不是"啪一下消失"
       ctx.fillStyle = alive
-        ? 'rgba(130,220,255,' + ((0.05 + (1 - k) * 0.08) * fade).toFixed(3) + ')'
+        ? (locked
+          ? 'rgba(255,198,110,' + ((0.10 + 0.07 * pulse) * fade).toFixed(3) + ')'
+          : 'rgba(130,220,255,' + ((0.05 + (1 - k) * 0.08) * fade).toFixed(3) + ')')
         : 'rgba(220,250,255,' + (0.20 * fade).toFixed(3) + ')';
       ctx.fill();
 
       // 棱边：受击那一下整圈闪白，比任何血条都直接
-      ctx.strokeStyle = this.shieldHit > 0 ? '#ffffff'
-        : (alive ? 'rgba(170,235,255,' + (0.22 + 0.30 * k).toFixed(2) + ')'
-          : 'rgba(230,250,255,' + (0.50 * fade).toFixed(2) + ')');
+      /* 锁壳优先于白闪（3.71）：玩家会**持续**开火，`shieldHit` 每帧被重置，
+       * 白闪会一直盖住琥珀色——实测截图里整个壳都是白的，
+       * 读起来和普通护盾没区别，"打不穿"这件事就失去了提示。 */
+      ctx.strokeStyle = locked
+        ? 'rgba(255,205,120,' + (0.50 + 0.28 * pulse).toFixed(2) + ')'
+        : (this.shieldHit > 0 ? '#ffffff'
+          : (alive
+            ? 'rgba(170,235,255,' + (0.22 + 0.30 * k).toFixed(2) + ')'
+            : 'rgba(230,250,255,' + (0.50 * fade).toFixed(2) + ')'));
       ctx.lineWidth = this.shieldHit > 0 ? 2.2 : 1.3;
       ctx.stroke();
 

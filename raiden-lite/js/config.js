@@ -4,7 +4,7 @@
  * 目标运行环境：浏览器（后续移植到小米手环 Vela 快应用）
  * ============================================================ */
 
-const VERSION = '3.66.0';                 // 每次迭代递增，标题页左下角显示
+const VERSION = '3.72.0';                 // 每次迭代递增，标题页左下角显示
 
 /* 开发开关：发布正式版时改成 false。
  * false 时调试面板完全不创建（不注册按钮、不响应触摸、不绘制），
@@ -458,11 +458,19 @@ const WAVE_TUNE = { timeScale: 0.80, gapScale: 0.68 };
  */
 const TEMP = {
   /* 3.40 把五件临时增益统一到 **35 秒**（盾 42→35、追踪 22→35、
-   * 宽头 22→35、雷电 26→35、僚机 30→35）。
+   * 宽头 22→35、雷电 26→35、僚机 30→35）。3.36 起它们是各自拉长的
+   * （"爽点全在效果本身"），结果是玩家记不住任何一件到底能撑多久——
+   * HUD 上四条进度条的刻度各不相同，读起来反而更费劲。
    *
-   * 3.36 起它们是各自拉长的（"爽点全在效果本身"），结果是玩家记不住任何一件
-   * 到底能撑多久——HUD 上四条进度条的刻度各不相同，读起来反而更费劲。
-   * 统一后只有一条心理量尺：**一件道具 ≈ 两段波次**，捡到什么都是这个价。 */
+   * 3.67 起 `dur` 与 `maxDur` **逐件独立**（默认值仍是 35 / 各自的叠加上限）：
+   * 想单独拉长某一件（比如护盾），只改它自己那一行，其它四件不受影响。
+   * 统一是"默认值一致"，不是"必须一起改"——这两件事在代码里本来就不冲突，
+   * 之前把它们混成了同一条规矩。
+   *
+   * `maxDur` 是**重复拾取时的封顶**：每吃一份加 `dur` 秒，但不会超过它。
+   * 想吃多少都一样就把它设成等于 `dur`（退化为"只刷新、不叠加"）；
+   * 现在每件给的是 1.7~2 份——护盾与僚机是"持续状态"，叠太久等于长期强化，
+   * 所以压在 60；三把临时武器是"限时实验"，叠满两份仍有明确边界，给 70。 */
   /* 护盾：机头前方一块椭圆光罩，只吃子弹不吃撞机。
    * hp 按"颗"算而不是按伤害：子弹伤害 1~3 差异大，按伤害算会让
    * 高伤弹幕（BOSS 散射）几发就碎，玩家根本看不出护盾存在过。
@@ -471,8 +479,9 @@ const TEMP = {
    * 打穿即回血的收尾保留——护盾碎掉是最危险的一瞬间，
    * 这时候把玩家从残血救回来，才符合"救命道具"该有的手感。 */
   shield: {
-    dur: 35,        // 持续时间（秒）——五件临时增益统一 35，见本段开头
-    hp: 30,         // 可挡子弹数
+    dur: 35,        // 持续时间（秒）——逐件独立，改这一行不影响其它四件
+    maxDur: 60,     // 重复拾取的时间封顶（累加到 60 秒就停）
+    hp: 30,         // 可挡子弹数（重复吃补满，不累加）
     breakHeal: 15,  // 被打穿（不是时间到）时立刻回的血
     rx: 30,         // 判定椭圆半径（横向）
     ry: 25,         // 判定椭圆半径（纵向）
@@ -498,7 +507,7 @@ const TEMP = {
   track: {
     /* r 是**判定**半径，13→16（3.42）：弹体视觉放大到 30×44 且带尾焰之后，
      * 判定还停在 13 会出现"尾焰扫过敌机却没命中"，玩家只当它是穿透弹。 */
-    dur: 35, cd: 0.32, dmg: 34, sp: 430, r: 16,
+    dur: 35, maxDur: 70, cd: 0.32, dmg: 34, sp: 430, r: 16,
     homing: 5.2, boomR: 52, boomDmg: 13
   },
   /* 宽头弹：巨弹，沿途吸掉敌方子弹。
@@ -510,7 +519,7 @@ const TEMP = {
    * 判定 r 保持 17：视觉刃宽 54px 与 34px 判定直径的差是刻意的，
    * 让玩家觉得"擦边就吞"比"贴图擦到却打空"舒服。 */
   wide: {
-    dur: 35, cd: 0.21, dmg: 12, sp: 940, r: 17
+    dur: 35, maxDur: 70, cd: 0.21, dmg: 12, sp: 940, r: 17
   },
   /* 雷电（3.36）：和电弧炮同样是链式，但打法完全相反——
    * 电弧炮是"朝前打、打到谁算谁"，雷电是"先看周围有没有目标，有才落雷"，
@@ -529,7 +538,7 @@ const TEMP = {
    *     六目标 204 DPS 已经是满配四槽（~195）的量级，再往上就成了按一下清屏。
    *     首跳 16 仍能一发带走 11~14 血的小快机，清群的**节奏**没变，只是密度下来。 */
   thunder: {
-    dur: 35, cd: 0.34, range: 560, jumpR: 210,
+    dur: 35, maxDur: 70, cd: 0.34, range: 560, jumpR: 210,
     dmg: 16, hops: 5, falloff: 1.2, minDmg: 3,
     color: 'rgba(198,162,255,0.95)',
     retry: 0.08       // 周围没敌人时的重试间隔：敌人一进圈就立刻落雷
@@ -539,7 +548,7 @@ const TEMP = {
    * 1.15 倍间隔——读作"第二把满级主武器"，35 秒内火力线直接翻倍。
    * 仍不覆盖正式僚机：正牌 O 是永久的，这件只亮 35 秒。 */
   ally: {
-    dur: 35, mul: 1.0, powMax: 5, oy: 46
+    dur: 35, maxDur: 60, mul: 1.0, powMax: 5, oy: 46
   }
 };
 
@@ -711,6 +720,41 @@ const HI_KEY = 'raiden-lite.hi.v1';
  * 2) shield 正面只吃 15% 伤害，等效血量 = 38/0.15 ≈ 253（改前 227）已经够厚，
  *    再往上堆等于逼玩家放弃从下方输出。
  */
+/* 敌机激光（3.68）：短时封锁线，定位是"限制走位"，不是处决技。
+ *
+ * 和 BOSS 激光刻意拉开三档差距：更细（10~12 vs 32~40）、更短（0.5s vs 1.3~1.6s）、
+ * 更轻（20 伤 vs 34）。**玩家可以硬顶穿过去**——代价是掉两成血，于是
+ * "绕开"和"硬吃"变成一个真实选择，而不是碰到就死。
+ *
+ * 三个模式按"玩家要学会什么"排：
+ *   down  朝下：方向固定，不读玩家位置。最好读的一档——看到竖线站到旁边就行，
+ *         第 1 关的轰炸机用它教"别站在正下方"。
+ *   side  横向：从机身向左右各伸到屏幕边缘，等于把画面横着切一刀。
+ *         持续时间短才成立：够久就变成"没有走位"，只有 0.5 秒才是"等一拍"。
+ *   aim   瞄准：蓄力期缓慢跟随（track rad/s），锁定后方向冻结。
+ *         比前两档高一级——玩家必须读出"红线在转过来"，提前横移，等它锁死。
+ *
+ * 蓄力与发射期间机身速度压到 hold 倍（见 Enemy._laserStep）：光柱跟着机身横扫的话，
+ * 读起来是"扫射"而不是"封锁线"，玩家也就无从判断该往哪边让。
+ *
+ * 机型配置写在 ENEMY_DEFS[].laser：{ mode, cd, 可选 charge/fire/width/dmg 覆盖 }。
+ * mode 必须是下面 modes 里的 key，拼错等于这条激光不存在（不会报错）。
+ */
+const ENEMY_LASER = {
+  dmg: 20,      // 每次接触的伤害（玩家 100 血、普通弹 26、BOSS 激光 34）
+  max: 3,       // 全场最多几条（含蓄力/锁定中），超了就先不开
+  range: 1400,  // 光束绘制/判定长度，够穿到屏幕外
+  modes: {
+    /* 蓄力越短越快出招；lock 是"方向已锁死"的预警窗口，给玩家的反应时间。
+     * `max` 是**同形态**上限（3.69）：朝下只封一列，三条能接受；
+     * 横贯全屏的 side 两条就把画面切成三段；要跟着人转的 aim 更狠，
+     * 三条同时在场时玩家永远在找那条正在转过来的线。 */
+    down: { charge: 0.55, lock: 0.22, fire: 0.55, width: 12, track: 0,   hold: 0.10, max: 3 },
+    side: { charge: 0.48, lock: 0.20, fire: 0.50, width: 11, track: 0,   hold: 0.10, max: 2 },
+    aim:  { charge: 0.80, lock: 0.34, fire: 0.50, width: 10, track: 0.90, hold: 0.10, max: 2 }
+  }
+};
+
 const ENEMY_DEFS = {
   scout:     { sprite: 'e_scout',     hp: 5,   speed: 120, score: 110, r: 0.60, ai: 'straight' },
   /* nonAim（3.53）：**只朝机头前方打，不读玩家位置**。
@@ -719,7 +763,20 @@ const ENEMY_DEFS = {
    * 追着打的留给 looper（爬升追击）/ riser（底部升起）/ sniper（狙击）/ 小 BOSS。
    * 判据：这机型的编排是不是"整排/整队压下来"，是就直射。 */
   fighter:   { sprite: 'e_fighter',   hp: 11,  speed: 95,  score: 190, r: 0.64, ai: 'shooter',  fire: 2.1, nonAim: true },
-  bomber:    { sprite: 'e_bomber',    hp: 52,  speed: 62,  score: 420, r: 0.70, ai: 'bomber',   fire: 2.9, nonAim: true },
+  /* 轰炸机从第 1 关就在，但它**不带激光**（`from: 2`，3.69）：
+   * 第 1 关的任务是"学会开飞机 + 认出编队"，一架 130 血的慢机已经是那一关
+   * 唯一的"打不死的东西"。光柱留到第 2 关再教——那时玩家已经会瞄准了，
+   * 首秀只出 1 波 2 架，一条竖线落完再出第二条，专门用来读"别站在它正下方"。
+   * 朝下的竖线是三种形态里最好读的，所以它当开场老师。
+   * cd 5.2 秒——它本身还在慢慢下降、每 2.9 秒丢三向弹，激光再密就变成干扰。
+   *
+   * 血量 52 → 130（3.71）→ 210（3.72）：带光柱的机型必须"熬得到自己出招"。
+   * 130 那一档实测只够"露头放一道"，第二道还没冷却完就被打碎，
+   * 玩家看到的仍然是"它闪一下就没了"。210 + 155 护盾在第 2 关约 11 秒，
+   * 够它把 5.2 秒的循环走满两轮；后期满配火力下约 3.4 秒，仍是"要专门打"的量。
+   * 加血只加在**带激光的型号**上，不碰 ENEMY_DEFS 里其它杂兵。 */
+  bomber:    { sprite: 'e_bomber',    hp: 210, speed: 62,  score: 420, r: 0.70, ai: 'bomber',   fire: 2.9, nonAim: true,
+               laser: { mode: 'down', cd: 5.2, from: 2 } },
   diver:     { sprite: 'e_diver',     hp: 14,  speed: 75,  score: 210, r: 0.60, ai: 'diver' },
   mine:      { sprite: 'e_mine',      hp: 12,  speed: 42,  score: 180, r: 0.68, ai: 'drift',  deathBurst: 12 },
   formation: { sprite: 'e_formation', hp: 10,  speed: 105, score: 180, r: 0.64, ai: 'straight' },
@@ -736,13 +793,34 @@ const ENEMY_DEFS = {
    * 而不是被满槽火力当杂兵顺手扫掉。青环用来和精英的金环区分。 */
   eelH:      { sprite: 'e_eel',       hp: 96,  speed: 70,  score: 1000, r: 0.62, ai: 'worm',  scale: 1.16,
                aura: '#7fe0ff', diveR: 170, diveSpeed: 460, diveRest: 0.85, dives: 3 },
-  jelly:     { sprite: 'e_jelly',     hp: 38,  speed: 48,  score: 420, r: 0.64, ai: 'hover',   fire: 3.1 },
+  /* 悬停水母：它本来就在 210px 高度上停十秒，是"朝下光柱"最自然的载体——
+   * 一根竖线从它脚下垂到屏幕底，等于把玩家赶出那一列。
+   * 38 → 110 血（3.71）→ 180（3.72）：悬停单位没有"飞走"这个出口，玩家绕开它之后
+   * 它就一直在画面中间放弹，血量必须撑得住"被顺手扫两轮"。
+   * 悬停十秒的机型本来就该是"打不完就得忍着"，180 + 145 护盾
+   * 让它在中段关卡活满整个悬停周期。 */
+  jelly:     { sprite: 'e_jelly',     hp: 180, speed: 48,  score: 420, r: 0.64, ai: 'hover',   fire: 3.1,
+               laser: { mode: 'down', cd: 4.6 } },
   drone:     { sprite: 'e_drone',     hp: 7,  speed: 135, score: 140, r: 0.58, ai: 'chase' },
-  shield:    { sprite: 'e_shield',    hp: 38,  speed: 55,  score: 600, r: 0.68, ai: 'tank' },
+  /* 坦克机正面只吃 15% 伤害，是从下方输出时最烦的一只——横向光栅正好反过来
+   * 逼玩家离开它那一行：它慢，光栅也就慢，0.5 秒的封条够玩家挪一次位。
+   * 第 4 关首秀，接在"轰炸机竖线"之后，把"横竖两种封锁"凑齐。
+   * 血量只给到 75（3.71 从 38 加到 60，3.72 到 75）：正面 15% 减伤意味着
+   * **有效血量 ×6.7**，75 血已经等效 500，比重型机还厚一截。
+   * 它的"耐打"由减伤负责，护盾只负责"露头那一段"，所以这里是全表加得最少的一只。 */
+  shield:    { sprite: 'e_shield',    hp: 75,  speed: 55,  score: 600, r: 0.68, ai: 'tank',
+               laser: { mode: 'side', cd: 4.8 } },
   kamikaze:  { sprite: 'e_kamikaze',  hp: 8,  speed: 145, score: 260, r: 0.56, ai: 'kamikaze' },
   flame:     { sprite: 'e_flame',     hp: 14,  speed: 88,  score: 340, r: 0.62, ai: 'shooter',  fire: 1.7, nonAim: true },
   mirror:    { sprite: 'e_mirror',    hp: 16,  speed: 92,  score: 400, r: 0.64, ai: 'mirror' },
-  heavy:     { sprite: 'e_heavy',     hp: 155, speed: 42,  score: 900, r: 0.76, ai: 'heavy',    fire: 2.5, nonAim: true },
+  /* 重型机：300 血、飞得最慢，本来就要玩家停下来磨。横向光栅在它身上读作
+   * "别贴着我这条线输出"——想安全地打它，得从上下错开的位置打。
+   * 155 → 300（3.71）→ 460（3.72）：它是唯一"真的会被玩家放着不管"的激光机
+   * （太慢、太厚），所以光柱必须一次接一次地落。460 + 260 护盾在满配火力下
+   * 约 6.5 秒一轮，够它放完三道；中段火力下能撑十几秒，等于"这一关它就是背景"。
+   * 只出现在第 5/7/9 关各两三波，不会把整关拖长。 */
+  heavy:     { sprite: 'e_heavy',     hp: 460, speed: 42,  score: 900, r: 0.76, ai: 'heavy',    fire: 2.5, nonAim: true,
+               laser: { mode: 'side', cd: 4.4 } },
 
   /* --- 进阶单位 --- */
   // 高级浮雷：同一贴图放大，血厚、爆散更多子弹
@@ -779,10 +857,36 @@ const ENEMY_DEFS = {
                scale: 1.25,
                deflect: { aim: Math.PI / 2, arc: 1.54, cap: 14, down: 2.2, bend: 1.15 } },
 
-  /* 狙击机：细长机身，飞得慢、血不厚，但会打"慢起快收"的狙击弹。
-   * 发弹间隔 3.6 秒——它是气氛单位，不是弹幕单位。 */
-  sniper:    { sprite: 'e_torpedo',   hp: 26,  speed: 60,  score: 520, r: 0.66, ai: 'sniper',
-               fire: 3.6, scale: 1.22 },
+  /* 狙击机：第 6 关首秀的"瞄准光柱"。它本来就在打慢起快收的狙击弹，
+   * 激光是同一套语法升级——蓄力 0.8 秒缓慢跟随，锁死后 0.34 秒白闪，
+   * 玩家必须在这段时间里横移出这条线。cd 6.4 秒（3.69 曾拉到 7.6 来限流，
+   * 3.72 血量翻倍后退回 6.4）：拉长 cd 是因为原来它活不过第一轮，
+   * 靠"少放几次"避免光柱刷屏；现在活 9 秒以上，第二轮的窗口自然出现，
+   * 再压着 cd 就变成"每架只放一道、放完就被忽略"。
+   * 真正的密度闸门仍是同形态上限 aim 2。
+   *
+   * 26 → 60（3.71）→ 100（3.72）：一枪 34 伤害，原来它连"挨两枪"都做不到。
+   * 100 + 130 护盾（×0.80 = 104）在第 6 关约 9 秒，够它打完"冷却 2 秒 +
+   * 蓄力锁定发射 1.6 秒"两轮；满配火力下约 2.1 秒，仍是"发现它就得先处理"的量。
+   * 本关波次 5 → 3（见 LEVELS[5]），只留 3 波，代价是"一次来两三架"变成
+   * "一次来两三架、但每架要打三秒"——这一关考的是读招，不是数量。 */
+  sniper:    { sprite: 'e_torpedo',   hp: 100, speed: 60,  score: 520, r: 0.66, ai: 'sniper',
+               fire: 3.6, scale: 1.22, laser: { mode: 'aim', cd: 6.4 } },
+
+  /* 突袭者（3.71）：从顶部压到半屏、悬停打完四轮扇形弹、掉头撤离。
+   * 它存在的理由不是"更难"，而是给玩家一道**选择题**：
+   * 260 血要在它离场前集火四点二秒才能吃掉，不吃它就带 20 发弹走人。
+   * 分数 3600 是全表杂兵最高（比小 BOSS 的 2400 还高），
+   * 因为它是唯一"自己送上门、但只给四点二秒窗口"的高价值目标——
+   * 分数不给够，玩家就不会为它停手，这道题也就不存在。
+   * 血量定在 260 而不是 460：满配三槽约 95~110 DPS，260 血约 2.4~2.7 秒，
+   * 中等配置（三槽 Lv3~4，约 62 DPS）也只要 4.2 秒——正好卡在窗口内。
+   * 460 血时实测第 9 关七架全部打不掉，那就不是选择题而是布景了。
+   * 金色光环是"优先打"的通用语言，和第 7 关精英怪的金环同色系。
+   * 血量高但**不设出场护盾**：它的耐打必须能被玩家提前算清（看得见的血条），
+   * 再加一层壳就变成"打了五秒发现还有盾"的挫败。 */
+  raider:    { sprite: 'e_heavy',     hp: 260, speed: 300, score: 3600, r: 0.78, ai: 'raider',
+               scale: 0.92, aura: '#ffcf6a' },
 
   /* --- 小 BOSS 变体：都是 ai:'miniboss'（同一条"升起 → 巡游"宿主流程），
    * 差异在 mb 字段决定的开火/机动方式。这样不用复制三遍爬升与血条逻辑。 --- */
@@ -863,6 +967,7 @@ const ENTRY_GUARD = {
     kamikaze: 0.06, formation: 0.08, mine: 0.10, mineH: 0.10,
     torpedo: 0.12, eel: 0.14, eelH: 0.16, flame: 0.12, mirror: 0.14, looper: 0,
     heavy: 0.22, bomber: 0.20, jelly: 0.18, shield: 0.22, deflect: 0.22,
+    raider: 0.22,   // 体型接近重装、从顶部高速压下来；0.22 是"整只露出来之后再给一眼"的量
     riser: 0, miniboss: 0, mbSniper: 0, mbPrism: 0, mbRam: 0,
     splitling: 0.15
   }
@@ -882,20 +987,27 @@ const ENTRY_GUARD = {
  * 同一份配置在前后期读作"前期一道坎、后期一层纸"，正是想要的曲线。
  * 护盾期只吸收伤害、不让本体掉血，所以它挡的是"爆发"，不是"推进"。 */
 const ENEMY_SHIELD = {
-  /* 中型机：血条本来就短，护盾是唯一的"露头缓冲"。
-   * 持续时间按体型给——大慢机在画面里待得久，小快机给长了会显得黏。 */
-  bomber:  { hp: 32, dur: 4.0 },
-  jelly:   { hp: 32, dur: 4.0 },
+  /* ---- 带激光的机型（3.71 整组重做） ----
+   * 实测（第 6 关 90 架狙击机）：只有 3 架开始过蓄力、1 架真的把光柱打出来。
+   * 平均存活 2.8 秒，而"冷却初值 + 蓄力 + 锁定"最快也要 5 秒才见光——
+   * 光柱这一整套机制在满配火力下等于不存在。
+   * 三条一起修：①血量抬到"满配集火也要三秒"（见 ENEMY_DEFS 里的注释）；
+   * ②护盾按同一量级配厚；③`holdFirst` 让护盾在第一次蓄力开始前打不穿
+   * （见 Enemy.hit），保证"露头必放一道光柱"。
+   * 关卡折扣（scale）不抬：这是"前期只挡一两秒"的曲线，抬了会把
+   * eel/flame/mirror 这些不带激光的机型一起加厚。前期用血量补。 */
+  bomber:  { hp: 155, dur: 5.2, holdFirst: true },
+  jelly:   { hp: 145, dur: 5.2, holdFirst: true },
+  shield:  { hp: 95,  dur: 5.0, holdFirst: true },
+  heavy:   { hp: 260, dur: 6.8, holdFirst: true },
+  sniper:  { hp: 130, dur: 5.6, holdFirst: true },
+  /* ---- 不带激光的中型机 ---- */
   eel:     { hp: 28, dur: 3.6 },
   flame:   { hp: 28, dur: 3.6 },
   mirror:  { hp: 30, dur: 3.8 },
-  sniper:  { hp: 34, dur: 4.2 },
   mineH:   { hp: 32, dur: 4.0 },
-  /* 重装：本体就厚，护盾只补"刚露头那一下"，量给大但相对本体仍是一小截 */
-  heavy:   { hp: 80, dur: 5.5 },
   /* 坦型 / 棱镜：本身已经各有一套减伤和偏折，护盾刻意压薄，
    * 否则三种防御叠起来会变成"打不动的墙"，那就不是可读了而是烦。 */
-  shield:  { hp: 36, dur: 4.0 },
   deflect: { hp: 32, dur: 4.0 },
   /* 小 BOSS：护盾期要够它完成"升起 → 转向 → 打出第一轮"。
    * 180 血在满配火力下约 2.5 秒，前期第一台小 BOSS（第 3 关）约 5 秒，
@@ -972,19 +1084,28 @@ const LEVELS = [
     ],
     /* 教学关：全场只有 3 种机型，节奏是"单排出场 → V 字 → 侧向 → 慢速重装"。
      * 一架 bomber 要打 1.5 秒才碎，是玩家第一次体验"打不死的东西"；
-     * 放在第 15 秒而不是开场，先让 scout 把射击手感立住。 */
+     * 放在第 15 秒而不是开场，先让 scout 把射击手感立住。
+     * 两波轰炸机都点 `intro`（3.70）：这个标记同时关掉两件事——自动补充波
+     * （最少补 2 架，2 架会变 4 架）和 `density` 放大（第 1 关 1.30，
+     * 写 2 架会出 3 架）。实测没关时同屏能到 6 架 52 血——
+     * 教学关的"打不死的东西"变成"打不完的东西"。
+     * 第 1 关也**没有光柱**（bomber 的 laser.from = 2），光束这一课从第 2 关开始。 */
     waves: [
       { at: 1.5,  kind: 'scout',   n: 4,  form: 'line',    speed: 112, gap: 0.16 },
       { at: 5.5,  kind: 'scout',   n: 5,  form: 'vee',     speed: 118, gap: 0.14 },
       { at: 9.0,  kind: 'fighter', n: 3,  form: 'line',    speed: 95,  gap: 0.36 },
       { at: 12.5, kind: 'scout',   n: 4,  side: 'left',   gap: 0.14 },   // 教学：第一次见到侧向来敌
-      { at: 15.5, kind: 'bomber',  n: 2,  form: 'sides',   speed: 64,  gap: 0.7 },
+      /* 第 1 关的轰炸机显式压回 58 血（3.71）：`ENEMY_DEFS.bomber` 为了"熬到放光柱"
+       * 抬到了 130，但这一关它**不带激光**（laser.from = 2），
+       * 130 血 + 34 护盾在单槽 Lv1 面前要打七八秒，直接变成"打不动的墙"。
+       * 这里的定位始终是"第一次见到一个要打一会儿的东西"，不是关卡门神。 */
+      { at: 15.5, kind: 'bomber',  n: 2,  form: 'sides',   speed: 64,  gap: 1.4, intro: true, hp: 58 },
       { at: 19.0, kind: 'scout',   n: 7,  form: 'arc',     speed: 126, gap: 0.11 },
       /* 第二次侧向：换成 fighter（会开火的机型），第一次只教"它们会从旁边来"，
        * 这一次教"从旁边来的东西也会朝你打"。3.31 起每关都补一条侧向波。 */
       { at: 20.7, kind: 'fighter', n: 3,  side: 'right',  gap: 0.34 },
       { at: 22.5, kind: 'fighter', n: 4,  form: 'vee',     speed: 100, gap: 0.30 },
-      { at: 25.5, kind: 'bomber',  n: 2,  form: 'line',    speed: 68,  gap: 0.6 },
+      { at: 25.5, kind: 'bomber',  n: 2,  form: 'line',    speed: 68,  gap: 1.4, intro: true, hp: 58 },
       { at: 27.0, kind: 'scout',   n: 8,  form: 'diamond', speed: 132, gap: 0.10 }
     ]
   },
@@ -1000,7 +1121,7 @@ const LEVELS = [
     support: null,
     bossHp: 2800,
     bossEntry: 'open',      // 第 2 关：出场就能打，见 LEVELS 头部说明
-    hint: '俯冲机 · 浮雷',
+    hint: '俯冲机 · 浮雷 · 光柱封锁',
     // 黄昏峡谷：峡谷热风横着刮，道具一路摆着下来；落底的会被风托回一段
     supply: [
       { at: 6,  kind: 'P', from: 'top', sway: 34 },
@@ -1009,7 +1130,8 @@ const LEVELS = [
       { at: 27, kind: 'H', from: 'top' },
       { ev: 'miniboss', delay: 1.4, kind: 'P', from: 'bounce' }
     ],
-    /* 本关只教三件事：俯冲机的落点、编队机的密度、浮雷"打爆会溅射"。
+    /* 本关教四件事：俯冲机的落点、编队机的密度、浮雷"打爆会溅射"、
+     * 以及**第一道光柱**（轰炸机，第 1 关只教它怎么挨打，不给它激光）。
      * 单只小 BOSS 放在最后 2 秒——它是第一个小 BOSS，必须单独出场，
      * 让玩家专心看清"从底部升起 → 顶部巡游 → 三向散射"这套流程，
      * 而不是像原来那样和 mbSniper 同时压上来（那时两种弹幕混在一起没法读）。 */
@@ -1017,6 +1139,24 @@ const LEVELS = [
       { at: 1.5,  kind: 'diver',     n: 4, form: 'line',   speed: 78,  gap: 0.32 },
       { at: 5.0,  kind: 'formation', n: 5, form: 'vee',    speed: 108, gap: 0.15 },
       { at: 8.5,  kind: 'diver',     n: 4, form: 'sides',  speed: 88,  gap: 0.26 },
+      /* 光柱首秀（3.69 / 3.70）：**两架**，隔 1.2 秒错开入场、横向拉开 150px。
+       * 只出一架时玩家看到的是一道孤零零的竖光——分不清它是"这道具的一部分"
+       * 还是随机的背景特效，也读不出"它封的是哪几列"。两条并排（但不同时蓄力）
+       * 才让"这片格子不能站"成立。`spread` 是必须的：`line` 默认间距 66px，
+       * 两条 12px 宽的光柱只差 54px，视觉上叠成一条粗线，等于还是"一条"。
+       * gap 0.7 秒：两架的发光期各 1.32 秒（蓄力 0.55 + 锁定 0.22 + 发射 0.55），
+       * 错开 0.7 才能有 0.6 秒以上的"一条实线 + 一条虚线"同屏——
+       * 拉大到 1.2 秒时重叠只剩 0.1 秒，玩家基本只会看到一条。
+       * 放在 8.5 的俯冲机之后、12.0 的浮雷之前，前后都是空档——
+       * 这一课只教一件事，不同时考别的。
+       * `intro` 关掉自动补充波与 density 放大：第 2 关密度 1.40，
+       * 写 2 架会出 3 架；再补一波就是 5 架，首秀直接顶到同屏上限。 */
+      /* 首秀的轰炸机显式给 80 血（3.71）：`ENEMY_DEFS.bomber` 的 130 是按
+       * "第 5 关以后满配火力"定的，第 2 关玩家还只有单槽 Lv2（约 20 DPS），
+       * 170 耐久要打八秒，实测这一关漏怪率从 4% 顶到 13%。
+       * 80 + 40 护盾 = 120，六秒；而它从露头到放完第一道光柱只要 3.8 秒，
+       * "必须撑到出招"和"新手打得动"在这里刚好不冲突。 */
+      { at: 10.2, kind: 'bomber',    n: 2, form: 'line',   speed: 62,  gap: 0.7, spread: 150, intro: true, hp: 80 },
       { at: 12.0, kind: 'mine',      n: 3, form: 'arc',    speed: 40,  gap: 0.46 },
       { at: 15.5, kind: 'formation', n: 5, form: 'arc',    speed: 112, gap: 0.13 },
       { at: 18.5, kind: 'diver',     n: 4, side: 'right', gap: 0.15 },   // 从右侧切入后俯冲
@@ -1078,7 +1218,7 @@ const LEVELS = [
     bossName: '轨道堡垒',
     support: null,
     bossHp: 4200,
-    hint: '追踪蜂群 · 正面护盾',
+    hint: '追踪蜂群 · 正面护盾 · 横向光栅',
     // 轨道残骸：失重，飘得慢、摆得大；两份补给在残骸之间来回弹
     supply: [
       { at: 6,  kind: 'P', from: 'top', speed: 58, sway: 46 },
@@ -1091,15 +1231,18 @@ const LEVELS = [
      *   drone   追着玩家跑 —— 不能再"站桩输出"，得边走边打
      *   shield  正面只吃 15% 伤害 —— 必须绕到侧后方
      *   looper  到底部调头爬升 —— 机尾第一次变成危险方向
+     * shield 同时是**横向光栅的首秀**（3.69）：前两波把入场间隔拉到 1.8 / 1.3 秒，
+     * 让光栅一条一条来。横贯全屏的封条一次来两条以上，屏幕上就没有"能站的缝"，
+     * 玩家只会记住"这关很挤"，记不住"该往哪让"。
      * 冲角型小 BOSS 放在末尾单只出场：它是唯一会主动撞上来的单位，
      * 和两只普通小 BOSS 混在一起出场时，玩家根本分不清哪个在俯冲。 */
     waves: [
       { at: 1.5,  kind: 'looper', n: 3, form: 'line',   speed: 106, gap: 0.34 },
       { at: 5.0,  kind: 'drone',  n: 6, form: 'arc',    speed: 138, gap: 0.10 },
-      { at: 9.0,  kind: 'shield', n: 2, form: 'line',   speed: 58,  gap: 0.9 },
+      { at: 9.0,  kind: 'shield', n: 2, form: 'line',   speed: 58,  gap: 1.8, intro: true },
       { at: 12.5, kind: 'drone',  n: 7, form: 'vee',    speed: 146, gap: 0.08 },
       { at: 16.0, kind: 'looper', n: 4, side: 'left',  gap: 0.14 },   // 侧向切入后落到下方再爬回来
-      { at: 19.5, kind: 'shield', n: 3, form: 'arc',    speed: 64,  gap: 0.7 },
+      { at: 19.5, kind: 'shield', n: 2, form: 'arc',    speed: 64,  gap: 1.3 },
       { at: 21.0, kind: 'drone',  n: 4, side: 'left',  gap: 0.12 },   // 侧向切入后直接转入追击
       { at: 23.0, kind: 'drone',  n: 8, form: 'diamond', speed: 150, gap: 0.07 },
       { at: 26.5, kind: 'looper', n: 4, form: 'vee',    speed: 116, gap: 0.28 },
@@ -1121,7 +1264,7 @@ const LEVELS = [
     support: 'mirror',
     bossHp: 5600,
     bossRate: 0.97,
-    hint: '喷火机 · 镜像机 · 悬停水母',
+    hint: '喷火机 · 悬停水母 · 突袭者',
     /* 压制开火（3.52）：本关的喷火机是"压制单位"——三波从顶部成排压下、两波从侧翼贴边切入，
      * 允许它在贴着画面上沿时就出手，弹会先一步压到底部，玩家一侧的横向空间被封掉，
      * 只能往另一边走，这是这一关的走位考题。
@@ -1144,12 +1287,18 @@ const LEVELS = [
      * 把节奏顶起来——两种速度交替，才不会变成打靶场。 */
     waves: [
       { at: 1.5,  kind: 'flame',  n: 4, form: 'line',   speed: 88,  gap: 0.42 },
-      { at: 5.0,  kind: 'jelly',  n: 2, form: 'sides',  speed: 50,  gap: 0.9 },
+      { at: 5.0,  kind: 'jelly',  n: 2, form: 'sides',  speed: 50,  gap: 1.2, intro: true },
       { at: 8.5,  kind: 'mirror', n: 4, form: 'sides',  speed: 94,  gap: 0.36 },
       { at: 12.0, kind: 'heavy',  n: 2, form: 'line',   speed: 44,  gap: 1.2 },
       { at: 15.5, kind: 'flame',  n: 6, form: 'arc',    speed: 94,  gap: 0.30 },
       { at: 17.2, kind: 'flame',  n: 4, side: 'right', gap: 0.22 },   // 侧向压边：喷火机从右翼贴过来
       { at: 19.0, kind: 'jelly',  n: 3, form: 'line',   speed: 54,  gap: 0.8 },
+      /* 突袭者首秀（3.71）：1 架，`intro` 同时关掉自动补充波和 density 放大
+       * （第 5 关密度 1.74，写 1 会出 2 架）。放在 19.0 的水母与 22.5 的镜像机
+       * 之间——前后都是慢段落，玩家的注意力有空档去读它。
+       * 只给 1 架是刻意的：460 血两只同时在场就不是"要不要停手打"的选择题，
+       * 而是"两只都打不掉"的挫败。首秀的任务是让人记住"金环 = 值 3600 分"。 */
+      { at: 21.2, kind: 'raider', n: 1, form: 'line',   gap: 0.5, intro: true },
       { at: 22.5, kind: 'mirror', n: 7, form: 'vee',    speed: 98,  gap: 0.22 },
       { at: 26.0, kind: 'heavy',  n: 2, form: 'sides',  speed: 48,  gap: 1.0 },
       { at: 29.5, kind: 'flame',  n: 7, form: 'line',   speed: 100, gap: 0.26 },
@@ -1170,7 +1319,7 @@ const LEVELS = [
     bossName: '极光母舰',
     bossHp: 6300,
     bossRate: 0.95,
-    hint: '潜伏者 · 狙击机 · 重型浮雷',
+    hint: '狙击机 · 瞄准光柱 · 重型浮雷',
     // 极光堡垒：极光像飘带一样左右摆，道具跟着摆；有一份从底部升起再落到顶盖
     supply: [
       { at: 6,  kind: 'P', from: 'top', sway: 52 },
@@ -1188,18 +1337,26 @@ const LEVELS = [
      * 让玩家有机会把视线从弹幕挪到底边/敌机机腹上。 */
     waves: [
       { at: 1.5,  kind: 'riser',  n: 5, form: 'line',   speed: 126, gap: 0.55 },
-      { at: 5.0,  kind: 'sniper', n: 3, form: 'sides',  speed: 58,  gap: 0.8 },
+      { at: 5.0,  kind: 'sniper', n: 2, form: 'sides',  speed: 58,  gap: 1.2, intro: true },
       { at: 8.5,  kind: 'mineH',  n: 4, form: 'arc',    speed: 34,  gap: 0.55 },
       { at: 12.0, kind: 'riser',  n: 5, form: 'sides',  speed: 134, gap: 0.42 },
-      { at: 15.5, kind: 'sniper', n: 4, form: 'arc',    speed: 60,  gap: 0.7 },
-      { at: 17.3, kind: 'sniper', n: 3, side: 'left',   gap: 0.7 },   // 侧向滑入后照样悬停蓄力：狙击不再只从上面来
+      { at: 15.5, kind: 'sniper', n: 2, form: 'arc',    speed: 60,  gap: 0.7 },
+      /* 侧向那批原本 17.3 / 3 架，和上一波只隔 1.8 秒 —— 七架狙击机同时在场时
+       * 光柱按 cd 错开也还是会顶着同屏上限，读起来是一片红线。往后挪到 18.2、
+       * 减到 2 架，让"瞄准光柱"始终是"一两条"而不是"一堵墙"（3.69）。 */
+      { at: 18.2, kind: 'sniper', n: 2, side: 'left',   gap: 1.0 },   // 侧向滑入后照样悬停蓄力：狙击不再只从上面来
       { at: 19.0, kind: 'mineH',  n: 5, form: 'line',   speed: 36,  gap: 0.5 },
       { at: 22.5, kind: 'riser',  n: 5, form: 'line',   speed: 140, gap: 0.35 },
-      { at: 26.0, kind: 'sniper', n: 4, form: 'sides',  speed: 62,  gap: 0.65 },
+      { at: 26.0, kind: 'sniper', n: 3, form: 'sides',  speed: 62,  gap: 0.65 },
       { at: 29.5, kind: 'mineH',  n: 6, form: 'arc',    speed: 38,  gap: 0.45 },
       { at: 31.2, kind: 'mineH',  n: 3, side: 'right', gap: 0.5 },   // 侧向飘入的浮雷：打爆照样十六向溅射
       { at: 33.0, kind: 'riser',  n: 6, form: 'sides',  speed: 144, gap: 0.32 },
-      { at: 36.5, kind: 'sniper', n: 5, form: 'arc',    speed: 64,  gap: 0.6 },
+      /* 原本这里还有第 5 波狙击机（5 架）。3.71 把 sniper 从 26 血抬到 60 血、
+       * 护盾从 34 抬到 80 之后，90 架的产出（含补充波与收尾段）总血量会翻倍，
+       * 而这一关的考点是"读警示"不是"打血牛"。整关压到 4 波、每波 2~3 架，
+       * 总量降到四十架上下——与改前总血量持平，但每只是"要打三秒"的目标。
+       * 空出来的 36.5 秒给突袭者，正好接在 riser 与压轴小 BOSS 之间。 */
+      { at: 36.5, kind: 'raider', n: 1, form: 'line',   gap: 0.5 },
       { at: 39.5, kind: 'miniboss', n: 2, form: 'line', speed: 58,  gap: 0.28, hp: 600 },
       { at: 39.8, kind: 'mbPrism',  n: 1, form: 'line', speed: 56,  gap: 0.28, lane: 0.5 }
     ]
@@ -1242,6 +1399,10 @@ const LEVELS = [
       { at: 12.0, kind: 'deflect',  n: 2, form: 'line',    speed: 48,  gap: 0.6 },
       { at: 15.5, kind: 'kamikaze', n: 7, form: 'wave',    speed: 168, gap: 0.20 },
       { at: 19.0, kind: 'heavy',    n: 2, form: 'line',    speed: 48,  gap: 1.0 },
+      /* 突袭者（3.71）：本关只给 1 架。它不吃 density 放大也不生成补充波
+       * （见 spawnFormation / startLevel 的那对条件），写 1 就是 1。
+       * gap 仍给 2.6——万一以后改成 2 架，两只同时悬停会让 20 发弹翻倍成 40 发。 */
+      { at: 20.5, kind: 'raider',   n: 1, form: 'line',    gap: 2.6 },
       { at: 22.5, kind: 'mirror',   n: 5, form: 'diamond', speed: 104, gap: 0.22 },
       { at: 24.5, kind: 'mirror',   n: 4, side: 'left',  gap: 0.3 },   // 侧向包抄：镜像机左右夹着复制火力
       { at: 26.0, kind: 'deflect',  n: 3, form: 'line',    speed: 50,  gap: 0.6 },
@@ -1348,12 +1509,17 @@ const LEVELS = [
       { at: 8.5,  kind: 'eel',      n: 5,  form: 'wave',    speed: 100, gap: 0.26 },
       { at: 12.0, kind: 'kamikaze', n: 6,  form: 'pincer',  speed: 175, gap: 0.18 },
       { at: 15.5, kind: 'mirror',   n: 6,  form: 'diamond', speed: 110, gap: 0.18 },
-      { at: 19.0, kind: 'jelly',    n: 4,  form: 'arc',     speed: 54,  gap: 0.6 },
+      { at: 19.0, kind: 'jelly',    n: 3,  form: 'arc',     speed: 54,  gap: 0.6 },
       { at: 22.5, kind: 'deflect',  n: 3,  form: 'line',    speed: 48,  gap: 0.6 },
-      { at: 26.0, kind: 'heavy',    n: 3,  form: 'pincer',  speed: 54,  gap: 0.8 },
+      { at: 26.0, kind: 'heavy',    n: 2,  form: 'pincer',  speed: 54,  gap: 0.8 },
       { at: 27.8, kind: 'drone',    n: 5,  side: 'left',  gap: 0.08 },   // 侧向蜂群：贴左边缘切进来再追人
       { at: 29.5, kind: 'drone',    n: 11, form: 'diamond', speed: 162, gap: 0.06 },
-      { at: 33.0, kind: 'shield',   n: 5,  form: 'wave',    speed: 74,  gap: 0.5 },
+      { at: 33.0, kind: 'shield',   n: 3,  form: 'wave',    speed: 74,  gap: 0.5 },
+      /* 突袭者（3.71）：接在盾阵之后——玩家刚被迫绕后打完一轮坦克机，
+       * 正面火力正好空出来，这两只从顶上压下来，是"要不要把枪口抬起来"
+       * 的最后一次提问。终局关给 2 架（gap 2.4 秒错开），
+       * 不吃 density 放大也不生成补充波（见 spawnFormation）。 */
+      { at: 34.5, kind: 'raider',   n: 2,  form: 'line',    gap: 2.4 },
       { at: 36.5, kind: 'sniper',   n: 3,  side: 'right',  gap: 0.7 },   // 侧向滑入后悬停蓄力
       /* 终局回收：三架反向绕，卡在本关后半段唯一一段"全是从上面压下来"的编排之前，
        * 让屏幕上出现"往返回旋"的第三条运动线（前有自机弹幕、侧面有蜂群、这里有环线） */

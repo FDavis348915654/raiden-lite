@@ -19,7 +19,16 @@ function spawnFormation(game, w) {
     return;
   }
 
-  const mul = isMiniKind(w.kind) ? 1 : (game.level.density || 1);   // 中型机不吃密度加成
+  /* 中型机不吃密度加成。
+   * `intro`（教学波，3.70）也不吃：这一波是让玩家看清某个机制的，
+   * `n` 必须就是玩家眼睛看到的数量。以前只关补波（`noEcho`）不关密度，
+   * 于是第 2 关写 `n: 2` 会被 1.40 的密度放大成 3 架、
+   * 第 1 关写 `n: 2` 会变 3 架——配置和画面对不上，而且不报错。
+   * raider（3.71）同样不吃：它是"固定 4.2 秒窗口 + 3600 分"的编排单位，
+   * 按 2.4 倍密度放大成 6~7 架之后，"要不要为它停手"这道题就变成
+   * "反正打不完"。判据是"数量必须精确、不能随关卡膨胀"的单位，
+   * 以后再加同类机型就往这个条件里加。 */
+  const mul = (w.intro || isMiniKind(w.kind) || w.kind === 'raider') ? 1 : (game.level.density || 1);
   const total = Math.max(1, Math.round(w.n * mul));
   const gap = w.gap || 0.16;
   const baseY = -48;
@@ -90,7 +99,11 @@ function spawnFormation(game, w) {
   for (let g = 0; g < groups; g++) {
     const count = Math.min(perGroup, total - emitted);
     const groupDelay = g * 0.70;
-    const gapX = Math.min(66, (VIEW.w - 110) / Math.max(1, count - 1));
+    /* 66 是"7 架横排不出屏"的上限。但 2~3 架时这个上限会把它们挤成一团：
+     * 第 2 关的两架轰炸机各放一条光柱，间距 66 时两条线几乎重叠，
+     * 看起来只是一条粗线，玩家读不出"这两列被封"。
+     * 需要铺开的波次用 `spread` 显式指定（教学波专用），默认仍是 66。 */
+    const gapX = Math.min(w.spread || 66, (VIEW.w - 110) / Math.max(1, count - 1));
     const mid = (count - 1) / 2;
 
     for (let i = 0; i < count; i++) {

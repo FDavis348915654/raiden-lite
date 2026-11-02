@@ -592,12 +592,30 @@ class Game {
         /* 巡航机的路线参数必须一起带过来：这个 arr 是逐字段重建的，
          * 漏掉 uo 就会退化成默认的横排编队（机型还是它，走位却没了）——
          * 静默失效、没有任何报错，只是"新敌人看起来没生效" */
-        uo: w.uo, max: w.max, pathR: w.pathR
+        uo: w.uo, max: w.max, pathR: w.pathR,
+        /* 突袭者的悬停高度（3.71）：同一个坑第三次出现——这个 arr 是逐字段重建的，
+         * 配置里写了、这里没搬，就会静默退回默认 300（"写 260 出来还是 300"）。 */
+        raidY: w.raidY,
+        /* intro 必须进这个白名单（3.70）：它要在 `spawnFormation` 里挡掉
+         * density 放大。漏搬的话补波会被挡住（补波读的是原始 w），
+         * 密度放大却照样生效——表现是"写了 2 架、出来 3 架"，
+         * 而且回看配置觉得一切正确。同一个坑 3.54 的 `uo` 已经踩过一次。 */
+        intro: w.intro,
+        /* spread 同理：`line` 编队的横向间距，默认 66（7 架横排的上限）。
+         * 不搬的话教学波会退回"挤成一团"，两条光柱叠成一条粗线。 */
+        spread: w.spread
       });
       // 中型机 / 蛇 / 巡航机不吃补充波：前两者是"数量不可控"，
       // 巡航机是"一架在屏幕上待 17 秒"，补一波进来等于同屏叠四架，
-      // 峰值会直接抬 7 只，把"这一架我还没打完"的焦点冲掉
-      if (!isMiniKind(w.kind) && w.kind !== 'snake' && !w.uo) {
+      // 峰值会直接抬 7 只，把"这一架我还没打完"的焦点冲掉。
+      // intro（3.70，原 noEcho）：教学波点名不补。补充波最少 2 架（Math.max(2, ...)），
+      // 所以"2 架的激光首秀"会被悄悄变成 4 架。同一个标记在 `spawnFormation`
+      // 里也负责不吃 density 放大——教学波的数量必须等于配置里写的数量，
+      // 否则玩家看到的和 `n` 写的永远差一截，且没有任何报错。
+      // raider（3.71）同理，但它不能借用 `intro`：`intro` 还会把激光初值改成固定值，
+      // 语义也不对。这里和 `spawnFormation` 的密度判断是**一对**，只关一处
+      // 会得到"主波 1 架、补波 4 架"的最差组合。
+      if (!isMiniKind(w.kind) && w.kind !== 'snake' && w.kind !== 'raider' && !w.uo && !w.intro) {
         arr.push({
           kind: w.kind,
           n: Math.max(2, Math.round(w.n * 0.6)),
@@ -805,6 +823,26 @@ class Game {
     this.shake(12);
     SFX.continueRun();
     this.contToastT = 1.8;
+  }
+
+  /** 同屏敌机激光数（含蓄力与锁定中，3.68）。
+   *
+   *  限流的意义不是性能，是玩法：一排轰炸机各放一条竖线，屏幕就变成栅栏，
+   *  玩家没有可以躲的地方，"限制走位"也就变成了"无路可走"。
+   *  上限放在 ENEMY_LASER.max，由开火判定那一侧读——不要在各个 AI 分支里另算。 */
+  /** 当前有多少条敌机光柱在蓄力/锁定/发射中。
+   *  传 `mode` 时额外给出"同形态有几条"——三种形态对玩家的压迫不是一回事：
+   *  朝下竖线只封一列，横贯全屏的 side 一次就切掉整行，会转的 aim 更是
+   *  逼你一直动。用同一条总数上限的话，后期满屏都是光柱时，
+   *  最容易读的 down 会把名额占光，最难读的 aim 反倒一直在场（3.69）。 */
+  enemyLaserLoad(mode) {
+    let total = 0, same = 0;
+    for (const e of this.enemies) {
+      if (!e.active || e.laserState <= 0) continue;
+      total++;
+      if (mode && e.laserCfg && e.laserCfg.mode === mode) same++;
+    }
+    return { total, same };
   }
 
   /** 点到线段距离（激光命中判定） */
@@ -1707,7 +1745,12 @@ class Game {
       diag: wave.diag,                         // 'ltr' / 'rtl'：对角穿越
       pathDir: wave.pathDir,                   // 'left' / 'right'：双 U 巡航的首次转弯方向
       pathR: wave.pathR,                       // 双 U 巡航的转弯半径
-      twin: wave.twin                          // 蛇：两条对向游走
+      twin: wave.twin,                         // 蛇：两条对向游走
+      /* 教学波标记要一路搬到 `_spawnEnemy`：这里和 `startLevel` 的重建白名单
+       * 是**两道**逐字段闸门，只补一处等于没补（3.70 踩过）。
+       * raidY 同理（3.71）：突袭者的悬停高度，漏搬就退回默认 300。 */
+      intro: wave.intro,
+      raidY: wave.raidY
     });
   }
 
@@ -2148,7 +2191,12 @@ class Game {
     // "最后一组飞出屏幕就进 BOSS 预警"这条节奏会被硬拖十几秒
     /* eelH（高级电鳗，3.59）也要排除：它要扑 3 次，一轮 1.9 秒，加上回气后的
      * 离场下坠能在屏上待十秒上下，收尾段补进来一架就能把 BOSS 预警硬拖几秒。 */
-    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH', 'patrol', 'eelH'].concat(MINI_KINDS);
+    /* raider（3.71）要排除，但理由不是"待得久"（它只有 4.2 秒）：它是**编排单位**，
+     * 每只 3600 分。收尾段是个随机刷量的池子，让它在里面滚，等于关卡后半段
+     * 白送一万多分，分数曲线会被这一段抹平——玩家打它也不再是"要不要停手"的选择，
+     * 而是"又刷出来一只"。凡是靠**固定窗口 + 高分数**立身份的单位，都不进这个池子。 */
+    const skip = ['snake', 'riser', 'looper', 'mine', 'mineH', 'patrol', 'eelH', 'raider']
+      .concat(MINI_KINDS);
     const kinds = [];
     const forms = [];
     for (const w of this.level.waves) {
@@ -2221,6 +2269,9 @@ class Game {
       diag: q.diag,
       pathDir: q.pathDir,
       pathR: q.pathR,
+      stage: this.level.id,     // 激光按关卡解锁（ENEMY_DEFS[].laser.from，3.69）
+      intro: q.intro,           // 教学波：激光初值固定，两架才能同时亮着（3.70）
+      raidY: q.raidY,           // 突袭者的悬停高度（3.71）
       shieldMul: shieldMul(this.level.id)
     });
   }
@@ -3087,6 +3138,27 @@ class Game {
       }
     }
 
+    /* 敌机激光（3.68）：和 BOSS 激光同一套点到线段判定，但只有一半宽、20 伤。
+     * 它是"封锁线"不是"处决技"——玩家可以绕，也可以硬顶一次（掉两成血），
+     * 这个取舍才是它存在的理由；做成碰到就死就只剩"等它结束"一种玩法。
+     * 命中一条就跳出：同一帧被第二条扫到没有额外意义（p.hit 自己也有无敌守卫）。 */
+    if (!this.god) {
+      for (const e of this.enemies) {
+        if (!e.active || e.laserState !== 2) continue;
+        const segs = e.laserSegs();
+        if (!segs) continue;
+        const half = (e.laserCfg.width || 10) * 0.5 + PLAYER.hitR;
+        let touch = false;
+        for (const s of segs) {
+          if (this._pointSegDist(p.x, p.y, s.x1, s.y1, s.x2, s.y2) < half) { touch = true; break; }
+        }
+        if (!touch) continue;
+        p.hit(this, e.laserCfg.dmg || ENEMY_LASER.dmg);
+        break;
+      }
+      if (!p.alive) return;
+    }
+
     // 双栅栏：碰到垂直能量柱受伤
     if (this.bossActive && !this.god && this.boss.fenceOn > 0) {
       const fx = this.boss.fenceX;
@@ -3776,7 +3848,12 @@ class Game {
    *  三种效果都是自动到期，不给剩余时间的话玩家只能"感觉好像没了"，
    *  没法判断该压上去用掉还是该退。护盾额外显示剩余耐久。
    *  3.47 起临时武器可以同时在手三把，所以排布改成按 4 条一行折行：
-   *  最挤的情况是 护盾 + 3 把武器 + 僚机 = 5 条，单行会顶到右上角的暂停按钮。 */
+   *  最挤的情况是 护盾 + 3 把武器 + 僚机 = 5 条，单行会顶到右上角的暂停按钮。
+   *
+   *  进度条刻度用 `dur`（一份时长）而不是 `maxDur`（叠加封顶）：条满要读作
+   *  "至少还有一整份"，这是玩家判断"还能不能压上去"的依据。叠加到 70 秒时
+   *  条一样是满的，具体还剩多久看右边的秒数——用 `maxDur` 当刻度的话，
+   *  第一次吃到手只有半条，看起来像"只捡到了半个道具"。 */
   _drawTempHud(ctx) {
     const p = this.player;
     const rows = [];
@@ -4278,6 +4355,32 @@ class Game {
         ctx.beginPath();
         ctx.arc(e.x, e.y, R2, D.aim - D.arc / 2, D.aim + D.arc / 2);
         ctx.stroke();
+      }
+
+      /* 敌机激光（3.68）：判定只在发射态（laserState===2）生效，调试层也只在
+       * 那一刻画——蓄力/锁定期画出来会让人以为"现在碰到就疼"。
+       * 画"中心线 + 两条边界"而不是一条粗线：粗线会把激光本体的亮芯整个盖住，
+       * 调试时反而看不出"看到的光柱屁股和判定差多少"。 */
+      if (e.laserState === 2) {
+        const segs = e.laserSegs();
+        if (segs) {
+          ctx.strokeStyle = 'rgba(255,140,90,0.95)';
+          ctx.lineWidth = 1;
+          const half = (e.laserCfg.width || 10) * 0.5;
+          for (const s of segs) {
+            ctx.beginPath();
+            ctx.moveTo(s.x1, s.y1);
+            ctx.lineTo(s.x2, s.y2);
+            ctx.stroke();
+            let nx = -(s.y2 - s.y1), ny = s.x2 - s.x1;
+            const len = Math.hypot(nx, ny) || 1;
+            nx = nx / len * half; ny = ny / len * half;
+            ctx.beginPath();
+            ctx.moveTo(s.x1 + nx, s.y1 + ny); ctx.lineTo(s.x2 + nx, s.y2 + ny);
+            ctx.moveTo(s.x1 - nx, s.y1 - ny); ctx.lineTo(s.x2 - nx, s.y2 - ny);
+            ctx.stroke();
+          }
+        }
       }
     }
 
