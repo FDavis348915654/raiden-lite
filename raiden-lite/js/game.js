@@ -3065,6 +3065,18 @@ class Game {
     return false;
   }
 
+  /** 这一帧这架敌机算不算"实体"（能不能被撞）。
+   *  玩家与队友共用同一把尺子——两处各写一份的话，以后改"从底部升起的单位
+   *  在爬升阶段豁免"这类规则，很容易只改一处，表现为"玩家撞不到、队友能撞到"。
+   *  冲角型（`mb:'ram'`）的俯冲段必须放行：它是唯一主动朝下冲过玩家的单位，
+   *  如果被"从底部升起"的豁免吃掉，它就永远撞不到人。 */
+  _canRam(e) {
+    if (e.entryImmune || e.spawnGuard > 0) return false;
+    if (e.def.mb === 'ram' && e.ramState === 2) return true;
+    if (e.fromBottom && e.y > 320) return false;
+    return true;
+  }
+
   _collide() {
     const p = this.player;
 
@@ -3384,15 +3396,8 @@ class Game {
 
     // 敌机撞机
     for (const e of this.enemies) {
-      if (!e.active) continue;
-      // 入场保护期内当它是"还在幕布后面"：撞不到玩家，也吃不到撞机伤害
-      if (e.entryImmune || e.spawnGuard > 0) continue;
-      // 从底部升起的单位在爬升阶段穿过屏幕，玩家常挡在路径上。
-      // 不豁免的话 miniboss 会直接撞死自己，玩家也白掉命。
-      // 但冲角型小 BOSS 的俯冲是**朝下**冲过玩家，那一段必须能撞到，
-      // 所以只有"正在爬升/悬停"才豁免。
+      if (!e.active || !this._canRam(e)) continue;
       const ramming = e.def.mb === 'ram' && e.ramState === 2;
-      if (e.fromBottom && e.y > 320 && !ramming) continue;
       if (dist2(p.x, p.y, e.x, e.y) < (PLAYER.hitR + e.r * 0.8) * (PLAYER.hitR + e.r * 0.8)) {
         /* 撞机 = 双方都掉血（3.32）。以前敌机吃 999 直接爆，
          * 现在按"自身最大血量 × ramEnemyDmg"结算：小机当场碎，重装机剩三成，
@@ -3409,10 +3414,48 @@ class Game {
       }
     }
 
+    /* 队友撞机（3.76）：队友和敌机都是实体，撞上就该互相掉血。
+     * 之前只有"敌弹打队友"，队友能整架从敌机身上穿过去——看起来像幽灵，
+     * 也让"跟随型贴着你绕"变成一种无成本的护体。
+     *
+     * 限流用 `ramT`（0.9 秒）而不是受击无敌 `invT`（0.55 秒）：后者太密，
+     * 实测游走型在第 9 关 30 秒里要撞十几次，存活从 57% 掉到 15%——
+     * 那就不是"撞了会疼"，而是"被敌机磨死"。两个计时器各管一件事：
+     * `invT` 管"被打中后短暂无敌"，`ramT` 管"上一次碰撞结算过了"。
+     *
+     * 敌机吃固定 45（`ALLY.ramPower`）而不是玩家那条 maxHp×0.7：
+     * 队友是 AI 控制的，撞上去不是玩家的选择，不该让它替玩家把敌机撞碎，
+     * 否则"把三架队友往敌群里推"会变成比开火更快的清场手段。
+     * 蛇整条不吃撞机伤害（和玩家一致）：它是墙，不是可以撞掉的单位。 */
+    for (const e of this.enemies) {
+      if (!e.active || !this._canRam(e)) continue;
+      for (const a of this.allies) {
+        if (!a.alive || a.ramT > 0) continue;
+        const rr = ALLY.hitR + e.r * 0.8;
+        if (dist2(a.x, a.y, e.x, e.y) >= rr * rr) continue;
+        if (e.ai !== 'snake') e.hit(ALLY.ramPower, null, this, { ignoreShield: true });
+        this.addParticle(a.x, a.y, {
+          vx: rand(-50, 50), vy: rand(-70, -10), life: 0.2, r: 3.5, color: a.col
+        });
+        a.ramT = ALLY.ramT;
+        a.hit(this, ALLY.ramDmg);
+        if (!e.active) break;      // 已经撞碎了，剩下的队友别再各自结算一遍
+      }
+    }
+
     // BOSS 撞机：用 BOSS_HULL 的多圆轮廓，比单个矩形贴合实体形状
     if (this.bossActive && !this.boss.dead) {
       if (this._bossHits(this.boss, p.x, p.y, PLAYER.hitR) && !this.god) {
         p.hit(this, PLAYER.ramDmg);
+      }
+      /* 队友撞 BOSS 本体：只队友掉血，BOSS 不掉——和玩家同一条规则
+       * （撞舰体是"你撞上去了"，不是"你打中了"）。不加这条的话，
+       * 队友在 BOSS 战里能直接穿过舰体，贴着中心白嫖输出。 */
+      for (const a of this.allies) {
+        if (!a.alive || a.ramT > 0) continue;
+        if (!this._bossHits(this.boss, a.x, a.y, ALLY.hitR)) continue;
+        a.ramT = ALLY.ramT;
+        a.hit(this, ALLY.ramDmg);
       }
     }
 

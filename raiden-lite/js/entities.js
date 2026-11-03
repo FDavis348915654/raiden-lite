@@ -1788,6 +1788,7 @@ class Ally {
     this.phase = rand(0, Math.PI * 2);
     this.hitT = 0;              // 白闪计时（绘制用）
     this.invT = 0;              // 受击短无敌（判定用），两者刻意分开
+    this.ramT = 0;              // 撞机冷却（3.76）：和受击无敌分开，见 ALLY.ramT
     this.entered = false;       // 还没升进画面：这一阶段只走"从下往上"
     this.boostT = 0;            // fireFrom 会读它（全弹发射的射速强化），队友永远没有
     this.roamDir = Math.random() < 0.5 ? -1 : 1;
@@ -1804,6 +1805,7 @@ class Ally {
     this.t += dt;
     if (this.hitT > 0) this.hitT -= dt;
     if (this.invT > 0) this.invT -= dt;
+    if (this.ramT > 0) this.ramT -= dt;
     this._move(dt, game);
     this._fire(dt, game);
   }
@@ -1834,7 +1836,7 @@ class Ally {
       if (this.x < 74) { this.x = 74; this.roamDir = 1; }
       if (this.x > VIEW.w - 74) { this.x = VIEW.w - 74; this.roamDir = -1; }
       tx = this.x;
-      ty = 210 + Math.sin(this.t * 0.7 + this.phase) * 76;
+      ty = ALLY.roamY + Math.sin(this.t * 0.7 + this.phase) * ALLY.roamAmp;
     } else {
       // camp：飞到自己那一侧的角落，之后只做小幅呼吸
       tx = this.side < 0 ? ALLY.campX + 40 : VIEW.w - ALLY.campX - 40;
