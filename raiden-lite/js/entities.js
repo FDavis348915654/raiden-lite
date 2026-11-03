@@ -2028,17 +2028,24 @@ class Enemy {
      * 一出生就顶着上一只的光柱（判定还真的算数）；laserCd 留成负数会立刻开火。
      * 冷却起点给随机：同批轰炸机同时进屏时，一起蓄力会变成一排同时落下的栅栏，
      * 读不出"谁在瞄我"。 */
-    /* `laser.from` 是**激光的解锁关**（3.69）：同一只机型可以在前面几关登场，
-     * 但不带光柱。不这么做的话，第 1 关的轰炸机就会放竖线——玩家还在学
-     * "怎么把飞机开对地方"，同时要读三条弹幕来源和一条封锁线，第一关直接劝退。
+    /* 光柱按关卡**点名**开启（3.81）：`laser.stages` 是关卡白名单。
      *
-     * 判据写成"关卡信息缺失就放行"（`!opt.stage || !def.laser.from`）：
-     * BOSS 召唤的援军、测试脚本直接 `init()` 都不传 stage，那些路径要维持
-     * 原本行为；只有主生成路径 `_spawnEnemy` 会传，配置才真正生效。
-     * 反过来"缺省按第 1 关算"会让所有没传 stage 的调用静默失去激光。 */
-    const unlocked = !def.laser ? false
-      : (!opt.stage || !def.laser.from || opt.stage >= def.laser.from);
-    const ml = unlocked ? ENEMY_LASER.modes[def.laser.mode] : null;
+     * 3.69 用的 `from`（从第几关起解锁）有个静默放大的问题：一旦解锁，
+     * 这只机型**后面每一关出场都带光柱**——第 2 关教完轰炸机，第 3~9 关
+     * 只要出轰炸机就是满屏竖线，光柱从"高级武器"变成了每关的背景。
+     * 现在改成白名单：jelly [5,9] / heavy [5,7,9] / shield [9] / sniper [9]。
+     * 同一只机型照样可以在别的关登场，只是不带光柱。
+     *
+     * 判据仍是"关卡信息缺失就放行"：BOSS 召唤的援军、测试脚本直接 `init()`
+     * 都不传 stage，那些路径要维持原本行为（否则会在没传 stage 的地方
+     * 静默失去激光）；只有主生成路径 `_spawnEnemy` 会传，配置才真正生效。
+     * 反过来"缺省按第 1 关算"同样会让这些路径全部失去激光。 */
+    const lz = def.laser;
+    const unlocked = !lz ? false
+      : (lz.stages
+          ? (!opt.stage || lz.stages.indexOf(opt.stage) >= 0)
+          : (!opt.stage || !lz.from || opt.stage >= lz.from));
+    const ml = unlocked ? ENEMY_LASER.modes[lz.mode] : null;
     this.laserCfg = ml ? Object.assign({}, ml, def.laser) : null;
     this.laserState = 0;      // 0 空闲 / 1 蓄力 / 1.5 锁定 / 2 发射
     this.laserT = 0;
