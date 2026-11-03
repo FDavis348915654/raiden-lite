@@ -1280,7 +1280,7 @@ class Player {
     this.lives = CONTINUE.lives;
     // 保险补满：命是续关买的，进来时空着手等于逼玩家再死一次
     this.bombs = PLAYER.maxBombs;
-    // 激光保险不补满（6 秒无敌 ×3 太强），只给一颗保底
+    // 激光保险不补满（4.5 秒无敌 ×3 太强），只给一颗保底
     this.lasers = Math.max(this.lasers, 1);
     this.invuln = CONTINUE.invuln;
     this.hp = this.maxHp;
