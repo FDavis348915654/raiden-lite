@@ -68,6 +68,9 @@ class Game {
 
     this.queue = [];
     this.snakes = [];                // 蛇形小 BOSS（数组：第 9 关双蛇，标题页也会读）
+    /* 队友（3.73）：不进对象池。上限 3 架、每架只在关内活一次，
+     * 池化的收益抵不上"池对象残留状态"的风险（见 Enemy 的 seq 那一串坑）。 */
+    this.allies = [];
     this.waveIdx = 0;
     this.bgScroll = 0;
     this.stars = [];
@@ -201,7 +204,10 @@ class Game {
       { id: 'supply',  label: '补给' },
       { id: 'prev',    label: '上一关' },
       { id: 'next',    label: '下一关' },
-      { id: 'boss',    label: '跳Boss' }
+      { id: 'boss',    label: '跳Boss' },
+      /* 队友（3.73）：随机性格，连点几次就能凑齐 follow / roam / camp 三种，
+       * 不用等 E 道具或分数奖励。 */
+      { id: 'ally',    label: '队友' }
     ];
     const perRow = 2;
     const rows = Math.ceil(defs.length / perRow);
@@ -278,6 +284,12 @@ class Game {
         this.jumpToBoss();
         this._devToast('跳到 BOSS · ' + this.boss.name);
         break;
+      case 'ally': {
+        const a = this.spawnAlly();
+        this._devToast(a ? '队友 · ' + ALLY.label[a.kind]
+          : '队友已满（上限 ' + ALLY.max + '）');
+        break;
+      }
     }
     SFX.weaponSwitch();
   }
@@ -698,6 +710,9 @@ class Game {
     this.bombFx = null;
     this.bullets.forEach(b => { b.active = false; });
     this.enemies.forEach(e => { e.active = false; });
+    /* 队友不能带到下一关（3.73）：它是"这一关的消耗品"，
+     * 跨关保留会让玩家在第 1 关攒满三架、后面八关一路白嫖火力。 */
+    this.allies.length = 0;
     this.pickups.forEach(p => { p.active = false; });
     this.particles.forEach(p => { p.active = false; });
     this.boss.active = false;
@@ -1759,6 +1774,86 @@ class Game {
     if (p) p.init(x, y, kind, weapon, opt);
   }
 
+  /* ------------------------------------------------ 队友（3.73） */
+
+  /** 召唤一架队友。`kind` 省略时随机取一种性格。
+   *  `quiet` 用于"一次补好几架"的场合（满命转化），避免每架都弹一次中央大字、
+   *  后一条把前一条盖掉，玩家只看见"队友 +1"却不知道自己加了三架。 */
+  spawnAlly(kind, quiet) {
+    if (this.allies.length >= ALLY.max) return null;
+    const a = new Ally();
+    a.init(this, kind);
+    this.allies.push(a);
+    if (!quiet) {
+      this._bigToast('ALLY', '队友加入 · ' + (ALLY.label[a.kind] || a.kind), a.col);
+    }
+    SFX.weaponSwitch();
+    return a;
+  }
+
+  /** 队友被击破也爆道具（3.73）：和玩家爆机是同一套语言——
+   *  "掉装备"是玩家唯一读得懂的损失与回报。
+   *  数量比玩家少（3 件 vs 玩家满配 5~6 件），因为它本来就是消耗品；
+   *  第一件固定是它自己的枪（L1），其余按 P/W/H 抽。 */
+  dropAllyLoot(a) {
+    const items = [{ kind: 'W', weapon: a.weapons[0] || 0, lv: 1 }];
+    for (let i = 1; i < ALLY.dropN; i++) {
+      const k = pick(['P', 'P', 'H', 'W']);
+      items.push({ kind: k, weapon: k === 'W' ? pick(a.weapons) : 0 });
+    }
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const dx = (i - (items.length - 1) / 2) * 26;
+      this.spawnPickup(
+        clamp(a.x + dx, 34, VIEW.w - 34),
+        clamp(a.y + rand(-8, 8), PLAY_TOP + 34, PLAY_BOTTOM - 10),
+        it.kind, it.weapon, { dir: 1, speed: 18, lv: it.lv }
+      );
+    }
+  }
+
+  onAllyLost(a) {
+    this.dropAllyLoot(a);
+    this._bigToast('LOST', (ALLY.label[a.kind] || '队友') + ' 被击破', '#ff9a9a');
+  }
+
+  /** 敌机改瞄队友时的目标选择（3.75）：**按距离反比加权随机**。
+   *
+   *  为什么不是直接取最近：最近的那架永远是冲在最前面的游走型，
+   *  三架队友里两架一辈子吸不到火力；而"跟随型挡在你身边"的价值
+   *  恰恰在于它也能把枪口从你身上引开。
+   *  为什么不是纯随机：那样"把队友摆到哪"就不再重要，
+   *  而队友三种性格的全部意义就是"它站在哪"。
+   *  距离 +40 是为了避免贴身时除零，同时让远近差距不至于极端。 */
+  pickAllyTarget(e) {
+    let sum = 0;
+    const w = [];
+    for (const a of this.allies) {
+      if (!a.alive) { w.push(0); continue; }
+      const k = 1 / (Math.hypot(a.x - e.x, a.y - e.y) + 40);
+      w.push(k);
+      sum += k;
+    }
+    if (sum <= 0) return null;
+    let r = Math.random() * sum;
+    let last = null;
+    for (let i = 0; i < this.allies.length; i++) {
+      if (w[i] <= 0) continue;
+      last = this.allies[i];
+      r -= w[i];
+      if (r <= 0) return last;
+    }
+    return last;      // 浮点误差兜底：可能一轮减完仍略大于 0
+  }
+
+  _updateAllies(dt) {
+    for (let i = this.allies.length - 1; i >= 0; i--) {
+      const a = this.allies[i];
+      if (!a.active || !a.alive) { this.allies.splice(i, 1); continue; }
+      a.update(dt, this);
+    }
+  }
+
   /* ------------------------------------------------ 关卡补给投放
    * 道具不再只靠敌人掉：每关按主题在固定时间点 / 事件点投放，
    * 入场方式有自上飘下、自下升起、以及到底边（或顶边）反弹再飘走四种。
@@ -1940,6 +2035,7 @@ class Game {
       this._updateParticles(dt);
       this._updateBullets(dt);          // 开场就能开火，子弹必须一起走
       this.player.update(dt, this._inputFor(dt), this);
+      this._updateAllies(dt);
       this._collectPickups();
       if (this.bannerT <= 0) this.state = 'play';
       return;
@@ -1953,6 +2049,7 @@ class Game {
       this._updatePickups(dt);        // 预警不是暂停，掉落物要继续下落
       this._collectPickups();         // 也必须能捡
       this._updateBombSystems(dt);    // 预警不是暂停：在飞的炸弹/激光/冲击环照样走
+      this._updateAllies(dt);
       if (this.warnT <= 0) this.spawnBoss();
       return;
     }
@@ -1964,6 +2061,7 @@ class Game {
       this._updatePickups(dt);
       this._updateBombSystems(dt);    // 同上：结算期的炸弹要能落地
       this.player.update(dt, this._inputFor(dt), this);   // 结算期间可自由移动吃道具
+      this._updateAllies(dt);
       this._collectPickups();
       if (this.clearT <= 0) {
         if (this.levelIdx + 1 < LEVELS.length) {
@@ -1997,6 +2095,7 @@ class Game {
     /* ---- play / boss ---- */
     const inp = this._inputFor(dt);
     this.player.update(dt, inp, this);
+    this._updateAllies(dt);
     this._updateBombSystems(dt);
     this._updateBullets(dt);
     this._updateSnake(dt);
@@ -3250,6 +3349,23 @@ class Game {
       }
     }
 
+    /* 敌方子弹 → 队友（3.73）：这就是"吸引火力"的物理形式——弹打在队友身上就消失。
+     * 必须排在玩家判定**之前**：同一颗弹不能既打队友又打玩家。
+     * 不判撞机：队友和敌机相撞会让"送一架队友去撞"变成一种玩法，
+     * 而队友的价值应该是输出与肉盾，不是自爆卡车。 */
+    for (const b of this.bullets) {
+      if (!b.active || b.friendly) continue;
+      for (const a of this.allies) {
+        if (!a.alive) continue;
+        if (dist2(b.x, b.y, a.x, a.y) >= (ALLY.hitR + b.r) * (ALLY.hitR + b.r)) continue;
+        b.active = false;
+        a.hit(this, b.dmg > 0 ? b.dmg
+          : (b.r >= 12.5 * ENEMY_BULLET_HIT_K ? PLAYER.bulletDmgBig : PLAYER.bulletDmg));
+        SFX.hit();
+        break;
+      }
+    }
+
     // 敌方子弹 → 玩家
     for (const b of this.bullets) {
       if (!b.active || b.friendly) continue;
@@ -3351,13 +3467,9 @@ class Game {
           p.hp = Math.min(p.maxHp, p.hp + PLAYER.healAmount);
         } else if (k.kind === 'E') {
           /* 加命：全表最稀有的一条（一整局平均只掉一件）。
-           * 封顶仍走 PLAYER.maxLives，和分数奖励共用一个上限。 */
-          const before = p.lives;
-          p.lives = Math.min(PLAYER.maxLives, p.lives + 1);
-          if (p.lives > before) {
-            this._bigToast('1UP', '加命道具 · 剩余命 ' + p.lives, '#ffe9a8');
-            SFX.extraLife();
-          }
+           * 3.73 起走 `gainLife`——命封顶（5）之后，这一件不会白捡，
+           * 而是转成一架队友。 */
+          this.gainLife(1, '加命道具');
         } else {
           // 兜底：不该再有"未知类型 = 加命"这种分支——命太贵，
           // 新增道具忘了写 case 时要静默无效，而不是白送一条命
@@ -3437,6 +3549,10 @@ class Game {
         ctx.restore();
       }
     }
+
+    /* 队友画在玩家之前：两架叠在一起时，玩家自己的机身必须在最上层——
+     * 混战里"我的飞机在哪"是唯一不能含糊的信息。 */
+    for (const a of this.allies) a.draw(ctx);
 
     // 玩家
     this.player.draw(ctx);
@@ -3641,13 +3757,43 @@ class Game {
       this.nextLifeScore += SCORE_1UP.step;
       gained++;
     }
+    this.gainLife(gained, '分数奖励');
+  }
+
+  /* 加命的**唯一入口**（3.73）：命封顶（PLAYER.maxLives）之后，
+   * 多出来的每一条转成一架队友。E 道具与分数奖励都必须走这里——
+   * 各写一份 `Math.min` 的话，迟早有一条会静默地把多出来的命吃掉
+   * （既不提示、也不转化，玩家只会觉得"这个道具没反应"）。 */
+  gainLife(n, label) {
     const p = this.player;
     const before = p.lives;
-    p.lives = Math.min(PLAYER.maxLives, p.lives + gained);
-    if (p.lives <= before) return;      // 已经封顶：不给提示，免得每档都弹一次空通知
-    this._bigToast('1UP', '分数奖励 · 剩余命 ' + p.lives, '#ffe9a8');
-    this.flashT = Math.max(this.flashT, 0.12);
-    SFX.extraLife();
+    p.lives = Math.min(PLAYER.maxLives, p.lives + n);
+    const gained = p.lives - before;
+
+    if (gained > 0) {
+      this._bigToast('1UP', label + ' · 剩余命 ' + p.lives, '#ffe9a8');
+      this.flashT = Math.max(this.flashT, 0.12);
+      SFX.extraLife();
+    }
+
+    const over = n - gained;
+    if (over <= 0) return;
+
+    let joined = 0;
+    for (let i = 0; i < over; i++) {
+      if (this.allies.length >= ALLY.max) break;
+      this.spawnAlly(undefined, true);
+      joined++;
+    }
+    /* 两条提示都在中央大字位，后写的会盖掉前一条——
+     * 所以"满命转化"这一句必须最后发，它才是玩家最需要知道的那件事。 */
+    if (joined > 0) {
+      this._bigToast('ALLY', '满命转化 · 队友 +' + joined, '#9fe8ff');
+    } else {
+      // 队友也满了：折算分数。道具不能"捡了等于空气"
+      this.score += 1200 * over;
+      this._bigToast('ALLY', '队友已满 · 折算 ' + (1200 * over) + ' 分', '#9fe8ff');
+    }
   }
 
   /** 飞机被打爆：把身上的武器 / 僚机 / 环绕机变成慢速下飘的道具。
@@ -3707,9 +3853,9 @@ class Game {
     ctx.fillStyle = 'rgba(140,180,210,0.75)';
     ctx.fillText(this.level.sub, 18, 44);
 
-    // 生命（小飞机图标；上限 10 个会占满整行，超过 6 个就收尾成 ×N）
+    // 生命（小飞机图标；上限 5，超过就收尾成 ×N——3.73 起 5 条封顶，多出来的转队友）
     ctx.textAlign = 'right';
-    const shownLives = Math.min(this.player.lives, 6);
+    const shownLives = Math.min(this.player.lives, 5);
     for (let i = 0; i < shownLives; i++) {
       const x = VIEW.w - 24 - i * 26;
       ctx.save();

@@ -1751,6 +1751,234 @@ class Player {
   }
 }
 
+/* ---------------------------------------------------------------- 队友 */
+/* 由 AI 驾驶的第二架飞机（3.73）。它不是"第二条命"：
+ * 不进武器 / 道具体系、带不进下一关、玩家不能操作，只在命数封顶后出现。
+ *
+ * 为什么直接复用 `Player.prototype.fireFrom`：队友换一把枪的手感必须和玩家
+ * 换一把枪一致——弹道、错峰、每级伤害表全部同一套。自己再写一份简化弹道，
+ * "队友的散射炮"和"玩家的散射炮"就会长得不一样，玩家一眼能看出来。
+ * 代价只有两个：补上 fireFrom 会读的 `shotQ` / `boostT` 两个字段
+ * （方法直接指向 Player 的原型实现，见类尾）。
+ */
+class Ally {
+  constructor() {
+    this.active = false;
+  }
+
+  /** 性格色：机身环、血条、爆机粒子共用这一份，避免三处各写一个色值 */
+  get col() { return ALLY.color[this.kind] || '#9fe8ff'; }
+
+  init(game, kind) {
+    this.active = true;
+    this.alive = true;
+    this.kind = kind || pick(ALLY.kinds);
+    /* camp 守哪一边用随机而不是"按召唤顺序左右交替"：
+     * 交替的话连点三次调试按钮永远得到 左 / 右 / 左，右侧的表现根本测不到。 */
+    this.side = this.kind === 'camp' ? (Math.random() < 0.5 ? -1 : 1) : 0;
+
+    this.maxHp = PLAYER.hp * ALLY.hpMul;
+    this.hp = this.maxHp;
+
+    // 从屏幕下方飞入：x 贴着玩家但不重合，否则一出来就叠在机身上
+    this.x = clamp(game.player.x + rand(-100, 100), 56, VIEW.w - 56);
+    this.y = VIEW.h + 56;
+
+    this.t = 0;
+    this.phase = rand(0, Math.PI * 2);
+    this.hitT = 0;              // 白闪计时（绘制用）
+    this.invT = 0;              // 受击短无敌（判定用），两者刻意分开
+    this.entered = false;       // 还没升进画面：这一阶段只走"从下往上"
+    this.boostT = 0;            // fireFrom 会读它（全弹发射的射速强化），队友永远没有
+    this.roamDir = Math.random() < 0.5 ? -1 : 1;
+
+    const pool = ALLY.loadout[this.kind] || ALLY.loadout.follow;
+    this.weapons = pool.slice();
+    this.lv = pool.map(() => randInt(1, ALLY.maxPower));
+    this.slotT = pool.map(() => rand(0.15, 0.5));
+    this.shotQ = [];            // fireFrom 的错峰队列
+  }
+
+  update(dt, game) {
+    if (!this.alive) return;
+    this.t += dt;
+    if (this.hitT > 0) this.hitT -= dt;
+    if (this.invT > 0) this.invT -= dt;
+    this._move(dt, game);
+    this._fire(dt, game);
+  }
+
+  /* ---------------- 走位 ----------------
+   * 三种性格共用同一套"朝目标点按速度移动"，区别只在目标点怎么算。
+   * 不用 lerp：lerp 的速度与距离成正比，玩家冲起来时队友会被甩掉，
+   * 而 follow 的全部价值就是"一直在你旁边"。 */
+  _move(dt, game) {
+    const p = game.player;
+    let tx = this.x, ty = this.y;
+
+    if (!this.entered) {
+      /* 入场段：先从屏幕下方升到工作高度，再切性格走位。
+       * 直接切的话，camp 型会在屏幕外就横着飘到角落去，
+       * 玩家只看到"我招了个队友，然后它没了"。 */
+      tx = clamp(p.x + (this.x < p.x ? -90 : 90), 56, VIEW.w - 56);
+      ty = PLAY_BOTTOM - 120;
+      if (this.y <= ty + 6) this.entered = true;
+    } else if (this.kind === 'follow') {
+      // 绕玩家慢慢公转：半径为 followDist，圆心略高于机身
+      const ang = this.t * 0.85 + this.phase;
+      tx = p.x + Math.cos(ang) * ALLY.followDist;
+      ty = p.y - 34 + Math.sin(ang) * 30;
+    } else if (this.kind === 'roam') {
+      // 横向匀速扫，碰到近边反弹：它要主动"迎上"弹幕，而不是躲
+      this.x += this.roamDir * ALLY.roamSpeed * dt;
+      if (this.x < 74) { this.x = 74; this.roamDir = 1; }
+      if (this.x > VIEW.w - 74) { this.x = VIEW.w - 74; this.roamDir = -1; }
+      tx = this.x;
+      ty = 210 + Math.sin(this.t * 0.7 + this.phase) * 76;
+    } else {
+      // camp：飞到自己那一侧的角落，之后只做小幅呼吸
+      tx = this.side < 0 ? ALLY.campX + 40 : VIEW.w - ALLY.campX - 40;
+      ty = PLAY_BOTTOM - ALLY.campY + Math.sin(this.t * 1.1 + this.phase) * 10;
+    }
+
+    const dx = tx - this.x, dy = ty - this.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 0.6) {
+      const sp = (this.entered ? ALLY.speed : ALLY.enterSpeed) * dt;
+      const step = Math.min(d, sp);
+      this.x += (dx / d) * step;
+      this.y += (dy / d) * step;
+    }
+    this.x = clamp(this.x, 24, VIEW.w - 24);
+    // 下界给到屏幕外一点：入场那一段本来就在画面外，夹进画面会变成"瞬移出现"
+    this.y = clamp(this.y, PLAY_TOP + 52, VIEW.h + 70);
+  }
+
+  /* ---------------- 开火 ---------------- */
+  _fire(dt, game) {
+    for (let i = 0; i < this.weapons.length; i++) {
+      this.slotT[i] -= dt;
+      if (this.slotT[i] > 0) continue;
+      const wi = this.weapons[i];
+      this.slotT[i] = WEAPONS[wi].cd * ALLY.cdMul;
+      /* `_shotMul` 必须在调用前后存 / 取：fireFrom 会把它设成队友的倍率且不还原，
+       * 之后玩家那些**不经过 fireFrom** 的子弹（三把临时武器）就会吃到 0.6 折扣。
+       * 队列入队时已经把倍率捕获进 `s.mul`，所以这里恢复外层值不影响到队友自己。 */
+      const prev = game._shotMul;
+      Player.prototype.fireFrom.call(this, game, this.x, this.y - 18,
+        ALLY.dmgMul, this.lv[i], wi, true);
+      game._shotMul = prev;
+    }
+    this._flushShots(dt, game);
+  }
+
+  /* ---------------- 受伤 / 阵亡 ---------------- */
+  hit(game, dmg) {
+    if (!this.alive) return false;
+    /* 短无敌期（3.74）：子弹仍然被吃掉、但不扣血。
+     * 吃弹是队友存在的意义（"吸引火力"的物理形式），所以这里不能像玩家那样
+     * 把判定放到碰撞层去 `continue`；只扣血那一半跳过。
+     *
+     * 无敌期必须留一点火花：碰撞层已经把 `b.active = false`，什么都不画的话
+     * 子弹撞上去凭空消失，读起来像判定卡了。用冷青色和扣血的白色区分——
+     * "这一发被盾弹开了"和"这一发真打进去了"是玩家要能分开的两件事。 */
+    if (this.invT > 0) {
+      game.addParticle(this.x, this.y, {
+        vx: rand(-30, 30), vy: rand(-40, -6), life: 0.16, r: 2.2, color: '#cfefff'
+      });
+      return false;
+    }
+    this.hp -= dmg;
+    this.invT = ALLY.hitInvuln;
+    this.hitT = ALLY.flashT;
+    game.addParticle(this.x, this.y, {
+      vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 3, color: '#ffffff'
+    });
+    if (this.hp <= 0) this.destroy(game);
+    return true;
+  }
+
+  destroy(game) {
+    if (!this.alive) return;
+    this.alive = false;
+    this.active = false;
+    game.explode(this.x, this.y, 1.5, this.col, 26);
+    game.explode(this.x, this.y, 0.8, '#ffffff', 12);
+    SFX.explode(false);
+    game.onAllyLost(this);
+  }
+
+  /* ---------------- 绘制 ---------------- */
+  draw(ctx) {
+    if (!this.active) return;
+    const col = this.col;
+
+    // 尾焰：比玩家的短一截，机身也比玩家小一圈——同款飞机也要能一眼分出"这不是我"
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const flick = 1 + Math.sin(this.t * 38 + this.phase) * 0.16;
+    const len = 16 * flick;
+    const g = ctx.createLinearGradient(this.x, this.y + 12, this.x, this.y + 12 + len);
+    g.addColorStop(0, 'rgba(200,245,255,0.8)');
+    g.addColorStop(1, 'rgba(60,140,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(this.x - 3.2, this.y + 12);
+    ctx.lineTo(this.x + 3.2, this.y + 12);
+    ctx.lineTo(this.x, this.y + 12 + len);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    Assets.draw(ctx, 'player', this.x, this.y, 0.62, this.hitT > 0 ? 0.55 : 1);
+
+    /* 性格色细环：三种队友在混战里只靠机身是分不出来的（贴图完全一样）。
+     * 环压在机身外圈、alpha 0.35 上下，和护盾 / 蓄力环不会重样。 */
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.30 + Math.sin(this.t * 3.2 + this.phase) * 0.08;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, 19, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    /* 无敌环（3.74）：向外扩散一圈冷白，读作"刚挨了一下、正在弹开"。
+     * 光靠机身闪一帧不够——弹幕密的时候玩家注意不到，
+     * 而"它现在打不动"正是决定"能不能往它身后躲"的信息。
+     * 半径 22→30、alpha 同步衰减，是一圈推开的冲击波；
+     * 起点必须**明显大于性格色环（19）**，否则两环重合，
+     * 挨打只表现为"环忽然亮了一点"，玩家分不出"它现在打不动"。 */
+    if (this.invT > 0) {
+      const k = this.invT / ALLY.hitInvuln;      // 1 → 0
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.85 * k;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.1;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 22 + (1 - k) * 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    /* 血条画在机身上方：队友是"替玩家挨打"的单位，看不见它还剩多少血，
+     * 玩家就没法判断"该不该往它身后躲"。宽度只有 34px——它是参照物，不是 HUD。 */
+    const w = 34, k = Math.max(0, this.hp / this.maxHp);
+    const by = this.y - 26;
+    ctx.fillStyle = 'rgba(6,14,22,0.72)';
+    ctx.fillRect(this.x - w / 2, by, w, 3);
+    ctx.fillStyle = k > 0.35 ? col : '#ff7a7a';
+    ctx.fillRect(this.x - w / 2, by, w * k, 3);
+  }
+}
+
+/* fireFrom 依赖这两个方法把连发弹排进错峰队列，直接指向 Player 的实现，
+ * 不复制代码——以后改错峰节奏（比如火神炮的 0.042s）队友会自动跟上。 */
+Ally.prototype._queueShot = Player.prototype._queueShot;
+Ally.prototype._flushShots = Player.prototype._flushShots;
+
 /* ---------------------------------------------------------------- 敌机 */
 class Enemy {
   constructor() {
@@ -2370,9 +2598,26 @@ class Enemy {
      * 同一股流向，玩家横移一次就全躲开，也读不出"谁在瞄我"。
      * 追着打的留给 looper / riser / sniper / 小 BOSS —— 它们的定位就是"盯着你"。
      * 注意 snipe 不吃这个覆盖（狙击机没有配 nonAim，配了也会变成朝前打慢弹）。 */
+    /* 敌人偶尔把枪口转向队友（3.75）：这是"吸引火力"的第二层——
+     * 挡弹是被动吃掉打向玩家的弹，改瞄是**主动**把弹流引走。
+     * 三条约束：
+     *  1. 只给瞄准型（`!def.nonAim`）：直射型的语义是"成排压下来铺一堵墙"，
+     *     让它拐弯去瞄队友，队形就读散了（那正是 3.53 加 nonAim 要解决的）；
+     *  2. 狙击机（`snipe`）不参与：卖点是"慢起快收 + 看得见的准星"，
+     *     拐向队友之后玩家根本不用躲，这套读招就废了；
+     *  3. **每次开火 roll 一次**，不在弹与弹之间 roll —— 一组 fan3/fan5 是一次瞄准，
+     *     逐发 roll 会让五发分裂成两个走向，读起来像乱打。
+     * BOSS 的弹幕不在这里（走 `BOSS_PATTERNS` 的编排），刻意不参与：
+     * 那是"读招"，不是"追人"。 */
+    let tgt = p;
+    if (!this.def.nonAim && mode !== 'snipe' && mode !== 'ring'
+      && game.allies.length && Math.random() < ALLY.taunt) {
+      const a = game.pickAllyTarget(this);
+      if (a) tgt = a;
+    }
     const ang = this.def.nonAim
       ? (this.faceUp ? -Math.PI / 2 : Math.PI / 2)
-      : Math.atan2(p.y - this.y, p.x - this.x);
+      : Math.atan2(tgt.y - this.y, tgt.x - this.x);
     const bx = this.x, by = this.y + this.h * 0.22;
     if (mode === 'aim') {
       game.spawnEnemyBullet(bx, by, Math.cos(ang) * 235, Math.sin(ang) * 235);
