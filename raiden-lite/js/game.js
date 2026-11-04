@@ -1785,7 +1785,11 @@ class Game {
     a.init(this, kind);
     this.allies.push(a);
     if (!quiet) {
-      this._bigToast('ALLY', '队友加入 · ' + (ALLY.label[a.kind] || a.kind), a.col);
+      /* 带上随身战法（3.83）：玩家要能一眼知道"这架带环绕机"，不然
+       * 画面里多出两个小光点只会被当成特效。base 没有后缀，保持文案干净。 */
+      const tag = ALLY.traitLabel[a.trait];
+      this._bigToast('ALLY', '队友加入 · ' + (ALLY.label[a.kind] || a.kind)
+        + (tag ? '（' + tag + '）' : ''), a.col);
     }
     SFX.weaponSwitch();
     return a;

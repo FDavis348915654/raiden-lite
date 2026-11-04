@@ -569,6 +569,7 @@ class Player {
     this.fireT = 0;
     this.alive = true;
     this.t = 0;
+    this.hurtT = 0;                  // 受击红闪计时（3.83），只影响绘制
     // 僚机、环绕机跨关保留：只有 reset() 会清空
     if (!this.options) this.options = [];
     if (!this.orbits) this.orbits = [];
@@ -649,6 +650,7 @@ class Player {
     // 阵亡到结算页之间有 1.5 秒空档，这期间不能再开火/开僚机
     if (!this.alive) return;
     if (this.invuln > 0) this.invuln -= dt;
+    if (this.hurtT > 0) this.hurtT -= dt;
 
     // 指针拖拽优先（手指 / 鼠标）
     if (input.pointerActive) {
@@ -1326,13 +1328,16 @@ class Player {
     if (this.invuln > 0 || !this.alive) return false;
     this.hp -= (dmg === undefined ? PLAYER.bulletDmg : dmg);
     this.invuln = PLAYER.hitInvuln;
+    this.hurtT = PLAYER.hurtFlash;
     SFX.playerHit();
     /* 受击反馈：震屏给到 0.46 秒（默认 0.32 太短，玩家还没意识到挨枪就结束了），
      * 半径 18 震不出"被撞了一下"的重量感；爆炸也放大一圈，让机位一眼可见。 */
     game.shake(26, 0.46);
     game.onPlayerHurt();
-    // 掉血也要有机体反馈：小爆炸 + 闪白，否则玩家只看 HUD 血条会"不知道自己挨了"
-    game.explode(this.x, this.y, 0.9, '#7fd6ff', 14);
+    // 掉血也要有机体反馈：小爆炸 + 闪红，否则玩家只看 HUD 血条会"不知道自己挨了"。
+    // 颜色从淡蓝改成暖橙红（3.83）：蓝色是这套游戏的"友方火力/增益"色，
+    // 用它当受伤反馈，玩家第一反应是"我吃到什么了"而不是"我被打了"。
+    game.explode(this.x, this.y, 0.9, '#ff8a5c', 14);
     /* 受击惩罚（3.42）：1 号位（主武器槽）火力 **-1 级**。
      * 3.40 写的是"一次到底"（直接按回 L1），实测太狠：血量制下 1.6 秒无敌只挡住
      * 连扣，挡不住"一发弹把三关攒的火力线抹平"，中弹一次就得重新捡一路 W 回来。
@@ -1407,6 +1412,14 @@ class Player {
     // 绘制时缩到 0.76（52 → 40），素材本身不动：
     // 改素材会重新排布整张图集，坐标一变、缓存没跟上就会全屏错位。
     Assets.draw(ctx, 'player', this.x, this.y, 0.76, blink ? 0.32 : 1);
+    /* 受击闪红（3.83）：之前挨打只有"震屏 + 淡蓝爆炸 + 冷白护罩环"，
+     * 三样都是冷色/变亮，玩家反馈"像吃了增益"。这里在机身本体上盖一层红色，
+     * 0.18 秒（`PLAYER.hurtFlash`）——红是全场唯一表示"掉血"的颜色。
+     * 用普通混合：`lighter` 会把红叠成粉白，又是同一类"发亮=好东西"的误读。 */
+    if (this.hurtT > 0) {
+      const f = this.hurtT / PLAYER.hurtFlash;
+      Assets.drawTinted(ctx, 'player', this.x, this.y, 0.76, HURT_COL, 0.9 * f);
+    }
 
     /* 判定核心（3.56）：真正会吃伤害的只有以 `(x, y)` 为心、`PLAYER.hitR`（6px）为半径的
      * 那一小块，可是正常游戏里除了调试层（`_drawHitboxes` 的红圈）没人看得见它——
@@ -1792,12 +1805,43 @@ class Ally {
     this.entered = false;       // 还没升进画面：这一阶段只走"从下往上"
     this.boostT = 0;            // fireFrom 会读它（全弹发射的射速强化），队友永远没有
     this.roamDir = Math.random() < 0.5 ? -1 : 1;
+    /* roam 的纵向相位（3.82）：只取周期的前 30%。
+     * 入场段本身约 1 秒（=0.077 个周期），这样刚入场时一定还在回撤段，
+     * 不会一飞进画面就直冲最前线。同时也是多架之间的错峰——
+     * 三架同时在场若相位相同，会整齐地一起上前、一起退，读起来像编队表演。 */
+    this.roamPh = rand(0, 0.30);
 
     const pool = ALLY.loadout[this.kind] || ALLY.loadout.follow;
     this.weapons = pool.slice();
     this.lv = pool.map(() => randInt(1, ALLY.maxPower));
     this.slotT = pool.map(() => rand(0.15, 0.5));
     this.shotQ = [];            // fireFrom 的错峰队列
+
+    /* 随身战法（3.83）：同一性格的队友也可能带不同附件，
+     * 这样"招到一架队友"每次都有一点未知，而不是三选一背完就完了。 */
+    this.trait = pick(ALLY.traits);
+    this.subs = [];
+    this.giftPending = this.trait === 'gift';
+    if (this.trait === 'orbit') {
+      const C = ALLY.orbit;
+      for (let i = 0; i < C.n; i++) {
+        this.subs.push({
+          mode: 'orbit',
+          // 均分一圈，两台反向转（和玩家那两台同一套规则，交点不会一直压在机身上）
+          ang: (Math.PI * 2 / C.n) * i,
+          dir: i % 2 ? -1 : 1,
+          cd: rand(0.4, 1.0),
+          x: this.x, y: this.y
+        });
+      }
+    } else if (this.trait === 'wing') {
+      for (let i = 0; i < 2; i++) {
+        this.subs.push({
+          mode: 'wing', side: i === 0 ? -1 : 1,
+          cd: rand(0.4, 1.0), x: this.x, y: this.y
+        });
+      }
+    }
   }
 
   update(dt, game) {
@@ -1807,6 +1851,7 @@ class Ally {
     if (this.invT > 0) this.invT -= dt;
     if (this.ramT > 0) this.ramT -= dt;
     this._move(dt, game);
+    this._updateSubs(dt, game);
     this._fire(dt, game);
   }
 
@@ -1836,7 +1881,16 @@ class Ally {
       if (this.x < 74) { this.x = 74; this.roamDir = 1; }
       if (this.x > VIEW.w - 74) { this.x = VIEW.w - 74; this.roamDir = -1; }
       tx = this.x;
-      ty = ALLY.roamY + Math.sin(this.t * 0.7 + this.phase) * ALLY.roamAmp;
+      /* 纵向是"周期性上前—回撤"（3.82），不是固定高度。
+       * cyc 走 0→1 一个往返；cos 映射出 k（0 = 后段 / 1 = 前段），再平方。
+       * 平方这一步是关键：曲线在后段附近平缓、在前段快速掠过，
+       * 于是"顶在最前面"只占一个周期里的少数时间——那正是玩家要的
+       * "可以上去，但别一直待在上面"（一直待着会撞进敌机编队，双方掉血）。 */
+      const cyc = (this.roamPh + this.t / ALLY.roamCycle) % 1;
+      const k = (1 - Math.cos(cyc * Math.PI * 2)) * 0.5;
+      const e = k * k;
+      ty = ALLY.roamBack + (ALLY.roamFront - ALLY.roamBack) * e
+        + Math.sin(this.t * 0.7 + this.phase) * ALLY.roamAmp;
     } else {
       // camp：飞到自己那一侧的角落，之后只做小幅呼吸
       tx = this.side < 0 ? ALLY.campX + 40 : VIEW.w - ALLY.campX - 40;
@@ -1854,6 +1908,52 @@ class Ally {
     this.x = clamp(this.x, 24, VIEW.w - 24);
     // 下界给到屏幕外一点：入场那一段本来就在画面外，夹进画面会变成"瞬移出现"
     this.y = clamp(this.y, PLAY_TOP + 52, VIEW.h + 70);
+  }
+
+  /* ---------------- 随身附件（3.83） ----------------
+   * orbit / wing 共用这一段：几何不同，开火走同一个入口。
+   * 伤害仍然走 `fireFrom`，所以火力表、弹道、错峰队列都和玩家同一套——
+   * 自己再写一份的后果是"队友的散射炮和玩家的不一样"，一眼能看出来，
+   * 而且以后改某把枪的弹道要改两处。
+   * 附件只是"多两路小火力"，不给它们独立血量：打不掉附件、
+   * 队友碎了附件一起碎，玩家不用再学一套"先打附件还是先打本体"。 */
+  _updateSubs(dt, game) {
+    /* 补给型：等它真正飞进画面再给，否则玩家看到的是"招了一架队友，
+     * 屏幕下方就冒出个道具提示"——因果反了，读起来像 bug。 */
+    if (this.giftPending && this.entered) {
+      this.giftPending = false;
+      const p = game.player;
+      const id = pick(ALLY.gift.pool);
+      if (p.alive) {
+        if (id === 'shield') p.gainShield(game);
+        else p.gainTempWpn(game, id);
+      }
+    }
+    if (!this.subs.length) return;
+    const wi = this.weapons[0];
+    if (wi === undefined) return;
+
+    /* 和 `_fire` 一样：fireFrom 会把 game._shotMul 设成自己的倍率且不还原，
+     * 不保存就会漏到玩家那三把"不经过 fireFrom"的临时武器上。 */
+    const prev = game._shotMul;
+    for (const s of this.subs) {
+      if (s.mode === 'orbit') {
+        const C = ALLY.orbit;
+        s.ang += C.spin * dt * s.dir;
+        s.x = this.x + Math.cos(s.ang) * C.rx;
+        s.y = this.y + Math.sin(s.ang) * C.ry;
+      } else {
+        s.x = this.x + s.side * ALLY.wing.dx;
+        s.y = this.y + ALLY.wing.dy;
+      }
+      s.cd -= dt;
+      if (s.cd > 0) continue;
+      const C = s.mode === 'orbit' ? ALLY.orbit : ALLY.wing;
+      s.cd = C.cd;
+      // 附件固定 L1：它们存在的意义是"多两路补刀"，不是第二套成长线
+      Player.prototype.fireFrom.call(this, game, s.x, s.y - 8, C.dmg, 1, wi, true);
+    }
+    game._shotMul = prev;
   }
 
   /* ---------------- 开火 ---------------- */
@@ -1881,9 +1981,8 @@ class Ally {
      * 吃弹是队友存在的意义（"吸引火力"的物理形式），所以这里不能像玩家那样
      * 把判定放到碰撞层去 `continue`；只扣血那一半跳过。
      *
-     * 无敌期必须留一点火花：碰撞层已经把 `b.active = false`，什么都不画的话
-     * 子弹撞上去凭空消失，读起来像判定卡了。用冷青色和扣血的白色区分——
-     * "这一发被盾弹开了"和"这一发真打进去了"是玩家要能分开的两件事。 */
+     * 被弹开的那一发画冷青火花（3.83 保留）：它和"真打进去"的红色是两套语言——
+     * 冷青 = 这发没造成伤害，红 = 这发真扣血了。 */
     if (this.invT > 0) {
       game.addParticle(this.x, this.y, {
         vx: rand(-30, 30), vy: rand(-40, -6), life: 0.16, r: 2.2, color: '#cfefff'
@@ -1893,8 +1992,10 @@ class Ally {
     this.hp -= dmg;
     this.invT = ALLY.hitInvuln;
     this.hitT = ALLY.flashT;
+    /* 受击火花从白色改成红色（3.83）：白色火花 + 白色冲击环 + 机身变亮，
+     * 三样凑在一起看起来像"吃了一颗能量道具"，而不是"它挨了一下"。 */
     game.addParticle(this.x, this.y, {
-      vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 3, color: '#ffffff'
+      vx: rand(-40, 40), vy: rand(-60, -10), life: 0.24, r: 3, color: HURT_COL
     });
     if (this.hp <= 0) this.destroy(game);
     return true;
@@ -1932,7 +2033,15 @@ class Ally {
     ctx.fill();
     ctx.restore();
 
-    Assets.draw(ctx, 'player', this.x, this.y, 0.62, this.hitT > 0 ? 0.55 : 1);
+    Assets.draw(ctx, 'player', this.x, this.y, 0.62);
+    /* 受击闪红（3.83）：这里原来写的是 `alpha = 0.55` 把自己画淡一遍。
+     * 机身变淡 + 白环 + 白火花，三样都是"变亮/变透明"的语言，
+     * 玩家反馈读起来像吃了增益。红色染色才读作"挨打"——
+     * 用普通混合而不是 lighter：叠亮会回到老问题，红色必须真的盖住机身色。 */
+    if (this.hitT > 0) {
+      const f = this.hitT / ALLY.flashT;      // 1 → 0
+      Assets.drawTinted(ctx, 'player', this.x, this.y, 0.62, HURT_COL, 0.88 * f);
+    }
 
     /* 性格色细环：三种队友在混战里只靠机身是分不出来的（贴图完全一样）。
      * 环压在机身外圈、alpha 0.35 上下，和护盾 / 蓄力环不会重样。 */
@@ -1946,23 +2055,56 @@ class Ally {
     ctx.stroke();
     ctx.restore();
 
-    /* 无敌环（3.74）：向外扩散一圈冷白，读作"刚挨了一下、正在弹开"。
+    /* 无敌环（3.74）：向外扩散一圈，读作"刚挨了一下、正在弹开"。
      * 光靠机身闪一帧不够——弹幕密的时候玩家注意不到，
      * 而"它现在打不动"正是决定"能不能往它身后躲"的信息。
      * 半径 22→30、alpha 同步衰减，是一圈推开的冲击波；
      * 起点必须**明显大于性格色环（19）**，否则两环重合，
-     * 挨打只表现为"环忽然亮了一点"，玩家分不出"它现在打不动"。 */
+     * 挨打只表现为"环忽然亮了一点"，玩家分不出"它现在打不动"。
+     *
+     * 颜色从纯白改成暖红（3.83）：白环是这三样里"增益感"最重的一项。
+     * 红环 + 红闪 + 红火花是同一个意思，"它正在挨打、且这段时间打不动"。 */
     if (this.invT > 0) {
       const k = this.invT / ALLY.hitInvuln;      // 1 → 0
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.85 * k;
-      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = 0.60 * k;
+      ctx.strokeStyle = '#ff7a5c';
       ctx.lineWidth = 2.1;
       ctx.beginPath();
       ctx.arc(this.x, this.y, 22 + (1 - k) * 8, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
+    }
+
+    /* 随身附件（3.83）：环绕机是小光球、僚机是小三角。
+     * 形状区分比颜色更重要——场上三架队友各带一种时，玩家要能一眼看出
+     * "哪架在放卫星、哪架拖着两架子机"，而不是去分辨两种相近的青色。 */
+    for (const s of this.subs) {
+      if (s.mode === 'orbit') {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = 'rgba(150,235,255,0.20)';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#bfefff';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.fillStyle = '#ffe08a';
+        ctx.beginPath();
+        ctx.moveTo(0, -5.5);
+        ctx.lineTo(4.6, 4.5);
+        ctx.lineTo(-4.6, 4.5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
     }
 
     /* 血条画在机身上方：队友是"替玩家挨打"的单位，看不见它还剩多少血，

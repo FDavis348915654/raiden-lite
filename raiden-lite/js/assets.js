@@ -9,6 +9,9 @@ const Assets = {
   bg: {},
   ready: false,
   bulletSprites: {},
+  /* 染色缓存（3.83）：受击闪红要把整帧贴图染成红色，每帧现染会反复建 canvas。
+   * 键是 `帧名|颜色`，图集换了就在 load 里清空。 */
+  _tints: {},
 
   load() {
     // 资源版本串：图集坐标（atlas.js）和图片必须同版本。
@@ -23,6 +26,7 @@ const Assets = {
 
     return Promise.all(jobs).then(() => {
       this.frames = ATLAS;
+      this._tints = {};
       this._buildBullets();
       this.ready = true;
     });
@@ -145,6 +149,48 @@ const Assets = {
       ctx.restore();
     } else {
       ctx.drawImage(this.sheet, f[0], f[1], f[2], f[3], cx - w / 2, cy - h / 2, w, h);
+    }
+    if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = 1;
+  },
+
+  /* 染色贴图（3.83）：受击要用"整体偏红"的机身，而不是拿原图叠一层白光。
+   * 叠白（`lighter` + 同图）在深色背景上等于"变亮/发光"，玩家反馈读起来像
+   * 吃了增益；红色必须真的换掉机身颜色，所以这里预烘一份染色版本。
+   * 只做 drawImage + source-atop 填充，不读像素，file:// 下也不会因跨源失败。 */
+  _tint(name, color) {
+    const key = name + '|' + color;
+    const hit = this._tints[key];
+    if (hit) return hit;
+    const f = this.frames[name];
+    if (!f) return null;
+    const c = document.createElement('canvas');
+    c.width = f[2];
+    c.height = f[3];
+    const g = c.getContext('2d');
+    g.drawImage(this.sheet, f[0], f[1], f[2], f[3], 0, 0, f[2], f[3]);
+    g.globalCompositeOperation = 'source-atop';   // 只染已有像素，边缘柔光不糊成方块
+    g.globalAlpha = 0.92;
+    g.fillStyle = color;
+    g.fillRect(0, 0, f[2], f[3]);
+    this._tints[key] = c;
+    return c;
+  },
+
+  /** 以中心点绘制染色精灵（参数同 draw） */
+  drawTinted(ctx, name, cx, cy, scale, color, alpha, rot) {
+    const c = this._tint(name, color);
+    if (!c) return;
+    const s = scale === undefined ? 1 : scale;
+    const w = c.width * s, h = c.height * s;
+    if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = alpha;
+    if (rot) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rot);
+      ctx.drawImage(c, -w / 2, -h / 2, w, h);
+      ctx.restore();
+    } else {
+      ctx.drawImage(c, cx - w / 2, cy - h / 2, w, h);
     }
     if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = 1;
   },
