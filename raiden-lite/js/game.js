@@ -76,6 +76,10 @@ class Game {
     this.stars = [];
     this.shakeT = 0;
     this.shakeAmp = 0;
+    /* 这一轮震屏的**标称时长**（3.84）：draw 里按 `shakeT / shakeDur` 求衰减，
+     * 以前固定写 0.32，而玩家受击传的是 0.46——前 0.14 秒的幅度反而比设定的
+     * 26px 还大（最大 37px），读作"越摇越狠"。 */
+    this.shakeDur = 0.32;
     this.bannerT = 0;
     this.warnT = 0;
     this.clearT = 0;
@@ -1476,6 +1480,10 @@ class Game {
 
   /** 吃到临时增益：复用武器提示位弹一次，玩家得知道"吃到了什么、能撑多久" */
   onTempGain(p, id) {
+    /* 装备共享之后（3.85）队友也会调到这里。提示位、音效、闪屏都是给玩家的
+     * 反馈，队友自带的装备不该在中央弹一条 "SHIELD"——那会被读成"我吃到了"。
+     * 守卫放在最前面，粒子也不放：三架队友同时带盾，一开局就是三圈爆点。 */
+    if (!p.isPlayer) return;
     const info = TEMP_INFO[id];
     this.wpnTitle = info.title;
     this.wpnSub = info.sub;
@@ -1495,6 +1503,7 @@ class Game {
 
   /** 临时增益到期：只报一句，不打断战斗 */
   onTempEnd(p, id) {
+    if (!p.isPlayer) return;
     this._devToast(TEMP_INFO[id].title + ' 已结束');
   }
 
@@ -1502,6 +1511,9 @@ class Game {
    *  最危险的一瞬间，所以用武器提示位正经弹一条，而不是走小字 devToast。
    *  同时把"回血 +15"写在副标题里：光看到血条涨一格，玩家不知道那是护盾给的。 */
   onShieldBreak(p, amt) {
+    /* 队友的护盾碎了没有提示（3.85）：玩家不需要知道"它那面盾没了"，
+     * 盾消失本身就是画面上的反馈；三架队友同时碎盾还会盖住真正该看的信息。 */
+    if (!p.isPlayer) return;
     this.wpnTitle = 'SHIELD BROKEN';
     this.wpnSub = '护盾被打穿 · 回血 +' + amt;
     this.wpnColor = '#7bffcf';
@@ -1516,6 +1528,7 @@ class Game {
   }
 
   onOptionGained(p) {
+    if (!p.isPlayer) return;   // 队友自带僚机不弹玩家提示（3.85）
     this.optToastT = 1.6;
     this.flashT = Math.max(this.flashT, 0.14);
     SFX.optionGain();
@@ -1530,6 +1543,7 @@ class Game {
   }
 
   onOptionFull(p) {
+    if (!p.isPlayer) return;
     this.optToastT = 1.8;
     this.optFull = true;
     SFX.optionGain();
@@ -1545,6 +1559,7 @@ class Game {
   }
 
   onOrbitGained(p) {
+    if (!p.isPlayer) return;   // 同上（3.85）
     this.orbitToastT = 1.6;
     this.flashT = Math.max(this.flashT, 0.12);
     SFX.optionGain();
@@ -1560,6 +1575,7 @@ class Game {
 
   /** 环绕机满员后再吃 R：转速强化，要有明确反馈 */
   onOrbitFull(p) {
+    if (!p.isPlayer) return;
     this.orbitToastT = 1.6;
     this.orbitBoostHint = true;
     this.flashT = Math.max(this.flashT, 0.16);
@@ -1785,9 +1801,10 @@ class Game {
     a.init(this, kind);
     this.allies.push(a);
     if (!quiet) {
-      /* 带上随身战法（3.83）：玩家要能一眼知道"这架带环绕机"，不然
-       * 画面里多出两个小光点只会被当成特效。base 没有后缀，保持文案干净。 */
-      const tag = ALLY.traitLabel[a.trait];
+      /* 带上随身装备（3.85）：玩家要能一眼知道"这架带了护盾 / 环绕机"，
+       * 不然画面里多出两个小光点只会被当成特效。
+       * 空手（约三成）时后缀为空，保持文案干净。 */
+      const tag = (a.equips || []).map(id => ALLY.equipLabel[id] || id).join(' + ');
       this._bigToast('ALLY', '队友加入 · ' + (ALLY.label[a.kind] || a.kind)
         + (tag ? '（' + tag + '）' : ''), a.col);
     }
@@ -1952,8 +1969,12 @@ class Game {
   /* 震屏：dur 可调。玩家受击要"更长更重"（0.46 秒），爆炸类保持默认 0.32 秒，
    * 否则一整关的击破震屏都拖长，屏幕会一直在抖。 */
   shake(amp, dur) {
+    const d = dur || 0.32;
     this.shakeAmp = Math.max(this.shakeAmp, amp);
-    this.shakeT = Math.max(this.shakeT, dur || 0.32);
+    /* 衰减基准跟着**这一轮实际时长**走（3.84）：两次震屏叠加时取较长的那个，
+     * 否则短的那次会把归一化基准压小，让振幅凭空变大。 */
+    this.shakeDur = this.shakeT > 0 ? Math.max(this.shakeT, d) : d;
+    this.shakeT = this.shakeDur;
   }
 
   /* 玩家被击中：屏幕四周压一层红晕 + 一次短红闪。
@@ -3081,6 +3102,57 @@ class Game {
     return true;
   }
 
+  /** 护盾挡弹（3.85 从 `_collide` 里抽出来）：玩家与队友共用同一套半椭圆判定。
+   *  返回 true 表示这一发已被挡下（子弹已回收）。
+   *
+   *  抽出来不是为了少几行，而是因为队友现在也带盾（`ALLY.tempPool` 里有 shield）：
+   *  两处各写一份判定，改半径/形状时必然漏一处，表现是"看着罩住了却没挡住"。
+   *  绘制在 `_drawShield`，椭圆的放大比例是 1.16——改判定要连带看那边。 */
+  _shieldBlock(host, b) {
+    const sh = host.shield;
+    if (!sh) return false;
+    const C = TEMP.shield;
+    const sx = host.x, sy = host.y - C.oy;
+    /* 半椭圆：罩口朝上，只挡上半个椭圆的弹。
+     * 底边判定留出子弹半径的重叠（b.r*0.6）：子弹贴着底边飞进来时，
+     * 视觉上明明压在盾板上，若只认"球心在上方"就会出现"穿盾而过"的落差。 */
+    if (b.y - b.r * 0.6 > sy) return false;
+    // 椭圆归一化判定：dx²+dy² ≤ 1 即在罩内。子弹半径折半计入，
+    // 大弹不必"中心点进椭圆"才算挡下
+    const dx = (b.x - sx) / (C.rx + b.r * 0.6);
+    const dy = (b.y - sy) / (C.ry + b.r * 0.6);
+    if (dx * dx + dy * dy > 1) return false;
+
+    b.active = false;
+    sh.hp -= 1;
+    sh.hitT = 0.12;
+    /* 挡弹反馈（3.34）：盾面自己抖（jit，画在 _drawShield 里）+ 一次极轻的震屏。
+     * 震屏只有 4px / 0.1s：护盾在密集弹幕里一秒能挡十几发，给到 10 以上
+     * 就变成持续晃动，反而看不清自己的站位。
+     * 3.85 起震屏只给玩家——队友的盾在屏幕边上挡弹，跟着抖就是持续晃动。 */
+    sh.jit = C.jit;
+    if (host.isPlayer) this.shake(4, 0.1);
+    this.addParticle(b.x, b.y, {
+      vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 4, color: '#9fe8ff'
+    });
+    SFX.hit();
+    if (sh.hp <= 0) {
+      host.shield = null;
+      /* 被打穿 ≠ 时间到（3.45）：这里要补血 + 走 `onShieldBreak`。
+       * 3.85 之前抽出来的这段调的是 `onTempEnd`，于是 `_updateTemp` 里那条
+       * "`broke` 才回血"的分支**永远走不到**（盾在碰撞层就被置空了），
+       * 破盾回血是死代码——玩家从来没拿到过那 15 点。 */
+      const heal = TEMP.shield.breakHeal;
+      if (heal > 0) {
+        host.hp = Math.min(host.maxHp, host.hp + heal);
+        this.onShieldBreak(host, heal);
+      } else {
+        this.onTempEnd(host, 'shield');
+      }
+    }
+    return true;
+  }
+
   _collide() {
     const p = this.player;
 
@@ -3332,36 +3404,10 @@ class Game {
     // 放在"敌方子弹 → 玩家"之前、环绕机之后：护盾是最外层的一道，
     // 同一颗弹被环绕机挡掉就不该再扣护盾耐久。
     if (p.shield) {
-      const C = TEMP.shield;
-      const sx = p.x, sy = p.y - C.oy;
       for (const b of this.bullets) {
         if (!b.active || b.friendly) continue;
-        /* 半椭圆：罩口朝上，只挡上半个椭圆的弹。
-         * 底边判定留出子弹半径的重叠（b.r*0.6）：子弹贴着底边飞进来时，
-         * 视觉上明明压在盾板上，若只认"球心在上方"就会出现"穿盾而过"的落差。 */
-        if (b.y - b.r * 0.6 > sy) continue;
-        // 椭圆归一化判定：dx²+dy² ≤ 1 即在罩内。子弹半径折半计入，
-        // 大弹不必"中心点进椭圆"才算挡下
-        const dx = (b.x - sx) / (C.rx + b.r * 0.6);
-        const dy = (b.y - sy) / (C.ry + b.r * 0.6);
-        if (dx * dx + dy * dy > 1) continue;
-        b.active = false;
-        p.shield.hp -= 1;
-        p.shield.hitT = 0.12;
-        /* 挡弹反馈（3.34）：盾面自己抖（jit，画在 _drawShield 里）+ 一次极轻的震屏。
-         * 震屏只有 4px / 0.1s：护盾在密集弹幕里一秒能挡十几发，给到 10 以上
-         * 就变成持续晃动，反而看不清自己的站位。 */
-        p.shield.jit = TEMP.shield.jit;
-        this.shake(4, 0.1);
-        this.addParticle(b.x, b.y, {
-          vx: rand(-40, 40), vy: rand(-60, -10), life: 0.22, r: 4, color: '#9fe8ff'
-        });
-        SFX.hit();
-        if (p.shield.hp <= 0) {         // 打穿：这一帧之后不再挡，避免"碎盾还吸弹"
-          p.shield = null;
-          this.onTempEnd(p, 'shield');
-          break;
-        }
+        if (!this._shieldBlock(p, b)) continue;
+        if (!p.shield) break;    // 打穿：这一帧不再挡，避免"碎盾还吸弹"
       }
     }
 
@@ -3373,6 +3419,10 @@ class Game {
       if (!b.active || b.friendly) continue;
       for (const a of this.allies) {
         if (!a.alive) continue;
+        /* 队友的护盾走同一个 `_shieldBlock`（3.85），且必须**优先于本体判定**：
+         * 同一颗弹不能既扣盾耐久又扣血。挡下半椭圆之外的弹会返回 false，
+         * 继续走下面的圆形判定。 */
+        if (a.shield && this._shieldBlock(a, b)) break;
         if (dist2(b.x, b.y, a.x, a.y) >= (ALLY.hitR + b.r) * (ALLY.hitR + b.r)) continue;
         b.active = false;
         a.hit(this, b.dmg > 0 ? b.dmg
@@ -3538,7 +3588,7 @@ class Game {
     ctx.save();
 
     if (this.shakeT > 0) {
-      const a = this.shakeAmp * (this.shakeT / 0.32);
+      const a = this.shakeAmp * (this.shakeT / this.shakeDur);
       ctx.translate(rand(-a, a), rand(-a, a));
     }
 

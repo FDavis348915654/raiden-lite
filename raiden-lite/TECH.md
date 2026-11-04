@@ -171,6 +171,22 @@ restore（震屏结束）
 仍然是冷青小火花且**不**染色——红 = 真扣血、冷青 = 没打进去，这个二分是玩家判断
 "能不能往它身后躲"的依据。
 
+**同一链路上还有一层自抖（3.84）**：`Player.hit()` / `Ally.hit()` 另外置 `shakeT`，
+`draw()` 开头算出 `(shx, shy)`，用一层 `ctx.translate` 包住"尾焰 → 机身 → 判定核 → 状态环"，
+在 `_drawShield` / 随身附件 / 血条之前 `restore`。偏移是两条不同频率正弦（72/100 rad/s
+与 78/107 rad/s）乘线性衰减系数，**不是每帧随机**——随机位移在 60fps 下读作闪烁。
+
+三条实现约束：①**判定坐标绝不参与**，`_collide` 读的仍是 `this.x/this.y`，
+抖的只是画布原点（同 `TEMP.shield.jit` 那条）；②**必须成对 save/restore**，
+这段 draw 里有多个局部 `save/restore`（尾焰、判定核、环），外层这对一旦漏掉 restore，
+后续护盾、HUD 会全部被平移；③**幅度上限受判定核约束**——亮核画在机身上、
+半径只有 `PLAYER.hitR`（6px），抖过 4px 就会让玩家觉得"核跑出了判定范围"。
+
+另外修掉一处既有偏差：`game.draw()` 的震屏衰减原来固定按 0.32 归一
+（`shakeAmp * shakeT / 0.32`），而玩家受击传的是 `shake(26, 0.46)`，
+前 0.14 秒系数大于 1、实际振幅 37px。现在 `shake()` 记 `shakeDur`（叠加取长），
+draw 按 `shakeT / shakeDur` 衰减。
+
 ### 7.3 子弹贴图预烘焙
 
 `Assets._buildBullets()` 在加载期用**离屏 canvas** 给每种子弹画一遍 `radialGradient`（核心亮斑 + 光晕 + 透明边），存成小图。运行时 `drawBullet()` 只做 `drawImage`。
@@ -287,6 +303,30 @@ restore（震屏结束）
 **`game._shotMul` 必须在调用前后存 / 取。** `fireFrom` 会把它设成队友的倍率（0.6）且**不还原**，
 而玩家有三把临时武器是**直接调 `spawnPlayerBullet`**、不经过 `fireFrom` 的——
 它们会静默吃到这个折扣。这类"全局临时变量不还原"的坑不报错，只让某个机制悄悄变弱。
+
+**队友的随身装备整套共享 Player 的原型方法（3.85）**：`_updateTemp` / `_fireTemp` /
+`_updateTempAlly` / `addOrbit` / `_updateOrbits` / `addOption` / `_updateOptions` /
+`_drawShield` / `_drawOrbits` / `_drawOptions` / `_drawTempAlly` 全部
+`Ally.prototype.xxx = Player.prototype.xxx`，队友只负责在 `init` 里建好字段
+（`shield / tempWpns / tempAlly / orbits / options / canFire / tempMul / subMul`）。
+这样 `ALLY.tempPool` 里加一个新 id，队友不用改任何代码就能带。
+
+三个必须一起做的细节：①`fireFrom` 也要指过去——`_updateOptions` / `_updateTempAlly`
+里写的是 `this.fireFrom(...)`，漏了每帧抛 `this.fireFrom is not a function`，
+而主循环的 `try/catch`（`_onCrash`）会吞掉它，表现是"帧循环卡住、`stageT` 不增长、
+子弹却越积越多"，从现象完全看不出是异常；②`game.onTempGain / onTempEnd /
+onShieldBreak / onOptionGained / onOrbitGained` 一律加 `if (!p.isPlayer) return`，
+这些回调会写 `wpnTitle` / `wpnToastT` / 播 `SFX`，队友走一遍就是"一出生弹三条 SHIELD"；
+③`_shotMul` 的存/取要在**共享方法内部**做（`_updateOptions` / `_updateTemp` /
+`_updateTempAlly` 各一处），不能只靠调用方——调用方有三个（`Player.update` /
+`Ally.update` / 未来任何新宿主），漏一个就漏一片。
+
+**`_shieldBlock(host, b)` 是玩家与队友唯一的护盾挡弹实现（3.85）**：半椭圆判定、
+扣耐久、jit、粒子、碎盾都在里面，`host` 只是 `Player` 或 `Ally`。震屏用
+`host.isPlayer` 排除队友——它在屏幕边上挡弹，跟着抖就是持续晃动。
+顺带修掉一处死代码：碎盾分支原来调 `onTempEnd`，于是 `_updateTemp` 里
+"`broke` 才回血"那段永远走不到（盾在碰撞层已被置空），玩家从来没拿到过那 15 点；
+现在碎盾直接补血 + `onShieldBreak`。
 
 **队友挡弹排在玩家判定之前**（`_collide` 里）：同一颗弹不能既打队友又打玩家。
 

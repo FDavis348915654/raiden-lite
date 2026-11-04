@@ -570,6 +570,7 @@ class Player {
     this.alive = true;
     this.t = 0;
     this.hurtT = 0;                  // 受击红闪计时（3.83），只影响绘制
+    this.shakeT = 0;                 // 受击自抖计时（3.84），同样只影响绘制
     // 僚机、环绕机跨关保留：只有 reset() 会清空
     if (!this.options) this.options = [];
     if (!this.orbits) this.orbits = [];
@@ -651,6 +652,7 @@ class Player {
     if (!this.alive) return;
     if (this.invuln > 0) this.invuln -= dt;
     if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.shakeT > 0) this.shakeT -= dt;
 
     // 指针拖拽优先（手指 / 鼠标）
     if (input.pointerActive) {
@@ -738,6 +740,11 @@ class Player {
   /** 僚机：指数平滑跟随，射速比主机慢 45%、伤害 55%、火力封顶 Lv2 */
   _updateOptions(dt, game) {
     if (!this.options.length) return;
+    /* `fireFrom` 会把 `game._shotMul` 设成自己的倍率且不还原（3.85）。
+     * 这个函数在 `_updateTemp` 之前跑，不还原的话，同一帧里"刚开过火的僚机"
+     * 会让玩家/队友的临时武器（直接走 spawnPlayerBullet、不经过 fireFrom）
+     * 静默吃 0.55 折扣。队友三架同时在场时这条路径每帧都在走。 */
+    const prevMul = game._shotMul;
     for (let i = 0; i < this.options.length; i++) {
       const o = this.options[i];
       o.t += dt;
@@ -755,13 +762,19 @@ class Player {
         if (wi === undefined) continue;
         o.slotT[s2] -= dt;
         if (o.slotT[s2] > 0 || !this.canFire) continue;
-        // 副槽火力和射速都再压一档，否则两架僚机四个槽会盖过主机
-        const mul = s2 === 0 ? 0.55 : 0.40;
-        const pow = Math.min(s2 === 0 ? 2 : 1, this.lv[wi] || PLAYER.startPower);
+        /* 副槽火力和射速都再压一档，否则两架僚机四个槽会盖过主机。
+         * 3.85 起再乘 `subMul`：队友共用这段更新，它的僚机也要按 0.6 结算。 */
+        const mul = (s2 === 0 ? 0.55 : 0.40) * (this.subMul || 1);
+        /* 等级按**槽**取（`lv[s2]`）。这里原来写的是 `lv[wi]`——`wi` 是武器 id
+         * （0~8），而 `lv` 是长度 2~4 的槽位数组，取到的永远是 undefined，
+         * 兜底成 L1。也就是说僚机火力从来没有跟随过等级。
+         * 队友的下限是 L2，若继续漏着，它的僚机反而比主武器弱一整档。 */
+        const pow = Math.min(s2 === 0 ? 2 : 1, this.lv[s2] || PLAYER.startPower);
         this.fireFrom(game, o.x, o.y - 18, mul, pow, wi);
         o.slotT[s2] = WEAPONS[wi].cd * (s2 === 0 ? 1.45 : 1.9);
       }
     }
+    game._shotMul = prevMul;
   }
 
   /* ---------------- 临时增益（护盾 / 临时武器 / 临时僚机） ----------------
@@ -808,7 +821,10 @@ class Player {
   gainTempAlly(game) {
     if (this.tempAlly) {
       this.tempAlly.t = Math.min(TEMP.ally.maxDur, this.tempAlly.t + TEMP.ally.dur);
-      this.invuln = Math.max(this.invuln, PLAYER.optionInvuln);
+      /* 无敌只有玩家需要（它有 `invuln`）。队友用的是 `invT`（受击短无敌），
+       * 而且它的装备是出生自带的、不存在"重复吃到"这条路径——
+       * 硬给会让它顶着一圈受击红环出生，读起来像"一出来就被打了"。 */
+      if (this.isPlayer) this.invuln = Math.max(this.invuln, PLAYER.optionInvuln);
     } else {
       this.tempAlly = { t: TEMP.ally.dur, x: this.x, y: this.y + TEMP.ally.oy, slotT: 0.12 };
     }
@@ -852,8 +868,17 @@ class Player {
         if (tw.cd <= 0) {
           /* _fireTemp 返回"下一次可开火要等多久"：追踪/宽头弹是固定射速，
            * 雷电在周围没敌人时会返回一个极短的 retry——它不该空转一整个 cd，
-           * 否则敌人刚飞进圈也得干等 0.4 秒才挨第一下。 */
+           * 否则敌人刚飞进圈也得干等 0.4 秒才挨第一下。
+           *
+           * `_shotMul` 在这里强制置 1（3.85）：临时武器的伤害已经按
+           * `tempMul` 算过了，而 `spawnPlayerBullet` 还会再乘一次
+           * `game._shotMul`。那个值可能残留着僚机（0.55/0.40）或队友（0.6）
+           * 的折扣——不置 1 的话，玩家刚被僚机开过火，手里的追踪弹就悄悄变弱，
+           * 而且完全不报错。 */
+          const prev = game._shotMul;
+          game._shotMul = 1;
           tw.cd = this._fireTemp(game, tw);
+          game._shotMul = prev;
         }
       }
     }
@@ -872,15 +897,24 @@ class Player {
   }
 
   /** 临时武器开火：不占槽、不吃 SLOT_DMG，也不进错峰队列（本身射速就慢）。
-   *  返回下一次开火的等待时间，见 _updateTemp。 */
+   *  返回下一次开火的等待时间，见 _updateTemp。
+   *
+   *  3.85 起这个方法**玩家和队友共用**（队友的原型直接指向它），
+   *  所以有两处要按宿主区分：
+   *    - `tempMul`：队友的临时武器按 0.6 结算。玩家的三把是按"限时实验武器"
+   *      定的（单体是主武器单槽的 1.4~2 倍），队友三架同时开火若照原值走，
+   *      等于场上多了一个满配玩家。
+   *    - 音效：队友打出来的枪声不播。三架同时开火已经够密，再来三层音效
+   *      玩家就分不清"这发是不是我打的"。 */
   _fireTemp(game, tw) {
+    const mul = this.tempMul || 1;
     if (tw.id === 'track') {
       const C = TEMP.track;
-      game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
+      game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg * mul, {
         kind: 'track', r: C.r, homing: C.homing, life: 3,
-        boom: { r: C.boomR, dmg: C.boomDmg }
+        boom: { r: C.boomR, dmg: C.boomDmg * mul }
       });
-      SFX.shoot();
+      if (this.isPlayer) SFX.shoot();
       return C.cd;
     }
     if (tw.id === 'thunder') {
@@ -893,18 +927,18 @@ class Player {
        * 玩家看到的是"这件道具捡了等于没捡"。 */
       const best = game.nearestChainTarget(this.x, this.y, C.range, null);
       if (!best) return C.retry;
-      game.chainLightning(this.x, this.y - 16, null, C.hops, C.dmg, {
+      game.chainLightning(this.x, this.y - 16, null, C.hops, C.dmg * mul, {
         first: best, firstR: C.range, radius: C.jumpR,
-        falloff: C.falloff, minDmg: C.minDmg, color: C.color
+        falloff: C.falloff, minDmg: C.minDmg * mul, color: C.color
       });
-      SFX.thunder();
+      if (this.isPlayer) SFX.thunder();
       return C.cd;
     }
     const C = TEMP.wide;
-    game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg, {
+    game.spawnPlayerBullet(this.x, this.y - 40, 0, -C.sp, C.dmg * mul, {
       kind: 'wide', r: C.r, life: 1.6, wideBlock: true
     });
-    SFX.shoot();
+    if (this.isPlayer) SFX.shoot();
     return C.cd;
   }
 
@@ -921,7 +955,13 @@ class Player {
     if (wi === undefined) return;
     ta.slotT -= dt;
     if (ta.slotT > 0 || !this.canFire) return;
-    this.fireFrom(game, ta.x, ta.y - 18, C.mul, Math.min(C.powMax, this.lv[0] || PLAYER.startPower), wi);
+    /* 队友共用这一段（3.85）：再乘一次 `tempMul`，
+     * 否则队友那一架临时僚机会按满配火力（1.0 倍）打，比它自己两把主武器的
+     * 0.6 倍还强——"随身带的东西比本职武器猛"正是要避免的观感。 */
+    const prevMul = game._shotMul;
+    this.fireFrom(game, ta.x, ta.y - 18, C.mul * (this.tempMul || 1),
+      Math.min(C.powMax, this.lv[0] || PLAYER.startPower), wi);
+    game._shotMul = prevMul;
     ta.slotT = WEAPONS[wi].cd * 1.15;
   }
 
@@ -1329,6 +1369,7 @@ class Player {
     this.hp -= (dmg === undefined ? PLAYER.bulletDmg : dmg);
     this.invuln = PLAYER.hitInvuln;
     this.hurtT = PLAYER.hurtFlash;
+    this.shakeT = PLAYER.hitShake;
     SFX.playerHit();
     /* 受击反馈：震屏给到 0.46 秒（默认 0.32 太短，玩家还没意识到挨枪就结束了），
      * 半径 18 震不出"被撞了一下"的重量感；爆炸也放大一圈，让机位一眼可见。 */
@@ -1385,6 +1426,23 @@ class Player {
      * 弹幕密的时候机身在半秒里"半隐身"，反而看不清自己的位置。
      * 所以只有"重生 / 续关 / 保险"这种长无敌才闪，短无敌靠下面那圈护罩表达。 */
     const blink = this.invuln > PLAYER.hitInvuln && Math.floor(this.t * 22) % 2 === 0;
+
+    /* 机体自抖（3.84）：下面整段（尾焰 → 机身 → 判定核 → 状态环）包在一层
+     * translate 里，受击后 0.3 秒内按衰减正弦左右震、上下晃。
+     * 判定位移绝不能跟着挪——`_collide` 读的仍是 this.x/this.y，
+     * 这里动的只是画布原点（同护盾挡弹抖动那条规矩：
+     * 3px 的漂移就够让玩家错过或白挨一颗弹）。
+     * 幅度受 PLAYER.hitShakeAmp 约束，横向满幅、纵向六成。 */
+    let shx = 0, shy = 0;
+    if (this.shakeT > 0) {
+      const sk = this.shakeT / PLAYER.hitShake;      // 1 → 0
+      /* 频率取 11~16Hz（72 / 100 rad/s）：再快就接近逐帧跳变，读作"闪"而不是"震"；
+       * 0.3 秒里横向约 3 个来回，是"被撞了一下、晃了两下"的量。 */
+      shx = Math.sin(this.t * 72) * PLAYER.hitShakeAmp * sk;
+      shy = Math.sin(this.t * 100 + 1.1) * PLAYER.hitShakeAmp * sk * 0.5;
+    }
+    ctx.save();
+    ctx.translate(shx, shy);
 
     /* 引擎尾焰：**一条**（3.56）。
      * 原来按 [-6, +6] 画两条，读起来是双发——但贴图的喷口只有一个（`nozzle(0.50)`，
@@ -1500,6 +1558,9 @@ class Player {
       ctx.stroke();
       ctx.restore();
     }
+
+    // 机身段结束：护盾 / 僚机 / 环绕机各有自己的坐标与抖动，不跟着机体震
+    ctx.restore();
 
     this._drawShield(ctx);
     this._drawOptions(ctx);
@@ -1800,6 +1861,7 @@ class Ally {
     this.t = 0;
     this.phase = rand(0, Math.PI * 2);
     this.hitT = 0;              // 白闪计时（绘制用）
+    this.shakeT = 0;            // 受击自抖计时（3.84），同样只影响绘制
     this.invT = 0;              // 受击短无敌（判定用），两者刻意分开
     this.ramT = 0;              // 撞机冷却（3.76）：和受击无敌分开，见 ALLY.ramT
     this.entered = false;       // 还没升进画面：这一阶段只走"从下往上"
@@ -1812,34 +1874,52 @@ class Ally {
     this.roamPh = rand(0, 0.30);
 
     const pool = ALLY.loadout[this.kind] || ALLY.loadout.follow;
-    this.weapons = pool.slice();
-    this.lv = pool.map(() => randInt(1, ALLY.maxPower));
-    this.slotT = pool.map(() => rand(0.15, 0.5));
+    const slots = randInt(ALLY.slots[0], ALLY.slots[1]);
+    this.weapons = pool.slice(0, slots);
+    this.lv = this.weapons.map(() => randInt(ALLY.minPower, ALLY.maxPower));
+    this.slotT = this.weapons.map(() => rand(0.15, 0.5));
     this.shotQ = [];            // fireFrom 的错峰队列
 
-    /* 随身战法（3.83）：同一性格的队友也可能带不同附件，
-     * 这样"招到一架队友"每次都有一点未知，而不是三选一背完就完了。 */
-    this.trait = pick(ALLY.traits);
-    this.subs = [];
-    this.giftPending = this.trait === 'gift';
-    if (this.trait === 'orbit') {
-      const C = ALLY.orbit;
-      for (let i = 0; i < C.n; i++) {
-        this.subs.push({
-          mode: 'orbit',
-          // 均分一圈，两台反向转（和玩家那两台同一套规则，交点不会一直压在机身上）
-          ang: (Math.PI * 2 / C.n) * i,
-          dir: i % 2 ? -1 : 1,
-          cd: rand(0.4, 1.0),
-          x: this.x, y: this.y
-        });
-      }
-    } else if (this.trait === 'wing') {
-      for (let i = 0; i < 2; i++) {
-        this.subs.push({
-          mode: 'wing', side: i === 0 ? -1 : 1,
-          cd: rand(0.4, 1.0), x: this.x, y: this.y
-        });
+    /* 随身装备（3.85）：容器必须在 `_equip` 之前建好——
+     * `_updateTemp` / `_updateOrbits` / `_updateOptions` 是 Player 的同一份实现，
+     * 它们默认这些字段存在，缺一个就是 "Cannot read properties of undefined"。 */
+    this.orbits = [];
+    this.options = [];
+    this.tempWpns = [];
+    this.shield = null;
+    this.tempAlly = null;
+    this.orbitBoostT = 0;       // 环绕机没有"吃满加速"这条路径，恒 0
+    this.canFire = true;        // 共享的 _updateTemp / _updateOptions 会读它
+    this.tempMul = ALLY.tempMul;   // 临时武器的伤害倍率（见 _fireTemp）
+    this.subMul = ALLY.tempMul;    // 僚机的伤害倍率（见 _updateOptions）
+    this._equip(game);
+  }
+
+  /** 抽 0~2 件随身装备并立刻装上（3.85）。
+   *  池子里存的是**玩家那套 id**，这里只负责分发到对应入口：
+   *  `orbit` / `option` 走 `addOrbit` / `addOption`，其余走 TEMP 的三个 gain。
+   *  以后 TEMP 加一件新物品，只要把 id 加进 `ALLY.tempPool`，
+   *  就会自动落到最后的 `gainTempWpn` 分支——这里不需要改。 */
+  _equip(game) {
+    const n = randInt(ALLY.tempCount[0], ALLY.tempCount[1]);
+    const pool = ALLY.tempPool.slice();
+    this.equips = [];       // 提示文案要读它（见 Game.spawnAlly）
+    for (let i = 0; i < n && pool.length; i++) {
+      const id = pool.splice(randInt(0, pool.length - 1), 1)[0];
+      this.equips.push(id);
+      if (id === 'orbit') {
+        // 两台：和玩家连吃两次 R 的结果完全一致（位置算法也走 addOrbit）
+        this.addOrbit(game);
+        this.addOrbit(game);
+      } else if (id === 'option') {
+        this.addOption(game);
+        this.addOption(game);
+      } else if (id === 'shield') {
+        this.gainShield(game);
+      } else if (id === 'ally') {
+        this.gainTempAlly(game);
+      } else {
+        this.gainTempWpn(game, id);
       }
     }
   }
@@ -1848,10 +1928,17 @@ class Ally {
     if (!this.alive) return;
     this.t += dt;
     if (this.hitT > 0) this.hitT -= dt;
+    if (this.shakeT > 0) this.shakeT -= dt;
     if (this.invT > 0) this.invT -= dt;
     if (this.ramT > 0) this.ramT -= dt;
     this._move(dt, game);
-    this._updateSubs(dt, game);
+    /* 三件随身装备全部走玩家的同一份实现（3.85）：
+     * 环绕机、僚机、临时物品的计时/跟随/开火都在 Player 里，
+     * 队友只要把字段准备好，行为就自动和玩家一致——
+     * 这也是"以后新增临时物品不用再改队友"的前提。 */
+    this._updateOrbits(dt);
+    this._updateOptions(dt, game);
+    this._updateTemp(dt, game);
     this._fire(dt, game);
   }
 
@@ -1910,52 +1997,6 @@ class Ally {
     this.y = clamp(this.y, PLAY_TOP + 52, VIEW.h + 70);
   }
 
-  /* ---------------- 随身附件（3.83） ----------------
-   * orbit / wing 共用这一段：几何不同，开火走同一个入口。
-   * 伤害仍然走 `fireFrom`，所以火力表、弹道、错峰队列都和玩家同一套——
-   * 自己再写一份的后果是"队友的散射炮和玩家的不一样"，一眼能看出来，
-   * 而且以后改某把枪的弹道要改两处。
-   * 附件只是"多两路小火力"，不给它们独立血量：打不掉附件、
-   * 队友碎了附件一起碎，玩家不用再学一套"先打附件还是先打本体"。 */
-  _updateSubs(dt, game) {
-    /* 补给型：等它真正飞进画面再给，否则玩家看到的是"招了一架队友，
-     * 屏幕下方就冒出个道具提示"——因果反了，读起来像 bug。 */
-    if (this.giftPending && this.entered) {
-      this.giftPending = false;
-      const p = game.player;
-      const id = pick(ALLY.gift.pool);
-      if (p.alive) {
-        if (id === 'shield') p.gainShield(game);
-        else p.gainTempWpn(game, id);
-      }
-    }
-    if (!this.subs.length) return;
-    const wi = this.weapons[0];
-    if (wi === undefined) return;
-
-    /* 和 `_fire` 一样：fireFrom 会把 game._shotMul 设成自己的倍率且不还原，
-     * 不保存就会漏到玩家那三把"不经过 fireFrom"的临时武器上。 */
-    const prev = game._shotMul;
-    for (const s of this.subs) {
-      if (s.mode === 'orbit') {
-        const C = ALLY.orbit;
-        s.ang += C.spin * dt * s.dir;
-        s.x = this.x + Math.cos(s.ang) * C.rx;
-        s.y = this.y + Math.sin(s.ang) * C.ry;
-      } else {
-        s.x = this.x + s.side * ALLY.wing.dx;
-        s.y = this.y + ALLY.wing.dy;
-      }
-      s.cd -= dt;
-      if (s.cd > 0) continue;
-      const C = s.mode === 'orbit' ? ALLY.orbit : ALLY.wing;
-      s.cd = C.cd;
-      // 附件固定 L1：它们存在的意义是"多两路补刀"，不是第二套成长线
-      Player.prototype.fireFrom.call(this, game, s.x, s.y - 8, C.dmg, 1, wi, true);
-    }
-    game._shotMul = prev;
-  }
-
   /* ---------------- 开火 ---------------- */
   _fire(dt, game) {
     for (let i = 0; i < this.weapons.length; i++) {
@@ -1992,6 +2033,7 @@ class Ally {
     this.hp -= dmg;
     this.invT = ALLY.hitInvuln;
     this.hitT = ALLY.flashT;
+    this.shakeT = ALLY.hitShake;
     /* 受击火花从白色改成红色（3.83）：白色火花 + 白色冲击环 + 机身变亮，
      * 三样凑在一起看起来像"吃了一颗能量道具"，而不是"它挨了一下"。 */
     game.addParticle(this.x, this.y, {
@@ -2015,6 +2057,19 @@ class Ally {
   draw(ctx) {
     if (!this.active) return;
     const col = this.col;
+
+    /* 受击自抖（3.84）：和玩家同一套（横向满幅、纵向六成、衰减正弦），
+     * 只是幅度小一圈、时间短一点——它挨打更频繁，抖太狠会把"谁中弹了"搅浑。
+     * 只包机身段（尾焰 / 贴图 / 性格环 / 无敌环），
+     * 随身附件与血条不跟着抖：血条是给人读数的，晃起来就看不清剩多少了。 */
+    let shx = 0, shy = 0;
+    if (this.shakeT > 0) {
+      const sk = this.shakeT / ALLY.hitShake;
+      shx = Math.sin(this.t * 78 + this.phase) * ALLY.hitShakeAmp * sk;
+      shy = Math.sin(this.t * 107 + 1.3) * ALLY.hitShakeAmp * sk * 0.5;
+    }
+    ctx.save();
+    ctx.translate(shx, shy);
 
     // 尾焰：比玩家的短一截，机身也比玩家小一圈——同款飞机也要能一眼分出"这不是我"
     ctx.save();
@@ -2077,35 +2132,16 @@ class Ally {
       ctx.restore();
     }
 
-    /* 随身附件（3.83）：环绕机是小光球、僚机是小三角。
-     * 形状区分比颜色更重要——场上三架队友各带一种时，玩家要能一眼看出
-     * "哪架在放卫星、哪架拖着两架子机"，而不是去分辨两种相近的青色。 */
-    for (const s of this.subs) {
-      if (s.mode === 'orbit') {
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = 'rgba(150,235,255,0.20)';
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, 7, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#bfefff';
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      } else {
-        ctx.save();
-        ctx.translate(s.x, s.y);
-        ctx.fillStyle = '#ffe08a';
-        ctx.beginPath();
-        ctx.moveTo(0, -5.5);
-        ctx.lineTo(4.6, 4.5);
-        ctx.lineTo(-4.6, 4.5);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-      }
-    }
+    // 机身段结束：护盾与随身装备按自己的坐标画，不吃这层抖动
+    ctx.restore();
+
+    /* 护盾 / 僚机 / 环绕机 / 临时僚机（3.85）全部走玩家的同一份绘制。
+     * 同一个道具长在谁身上都该是同一个样子——玩家已经把"紫球是临时僚机、
+     * 青球是环绕机、半椭圆是护盾"这套视觉学过一次，队友身上不该再教一遍。 */
+    this._drawShield(ctx);
+    this._drawOptions(ctx);
+    this._drawTempAlly(ctx);
+    this._drawOrbits(ctx);
 
     /* 血条画在机身上方：队友是"替玩家挨打"的单位，看不见它还剩多少血，
      * 玩家就没法判断"该不该往它身后躲"。宽度只有 34px——它是参照物，不是 HUD。 */
@@ -2122,6 +2158,42 @@ class Ally {
  * 不复制代码——以后改错峰节奏（比如火神炮的 0.042s）队友会自动跟上。 */
 Ally.prototype._queueShot = Player.prototype._queueShot;
 Ally.prototype._flushShots = Player.prototype._flushShots;
+/* `_updateOptions` / `_updateTempAlly` 里写的是 `this.fireFrom(...)`。
+ * 队友原本只通过 `Player.prototype.fireFrom.call(this, ...)` 显式调用，
+ * 原型上没有这个方法——共享过来之后一帧就炸 "this.fireFrom is not a function"，
+ * 而且因为主循环有 try/catch，表现是"帧循环静默卡住、stageT 不再增长"。 */
+Ally.prototype.fireFrom = Player.prototype.fireFrom;
+
+/* 随身装备全部共享 Player 的实现（3.85）：环绕机、僚机、五件临时物品的
+ * 更新与绘制都只有一份代码。队友只要在 init 里把字段建好，行为就自动和玩家
+ * 一致——以后 TEMP 新增一件物品，队友**不用改任何代码**就能带。
+ *
+ * 为什么不是让 Ally 继承 Player：Player 那套带着输入、生命、武器槽、无敌、
+ * 重生这些玩家专属状态，继承会让队友被迫背着一堆用不到的字段
+ * （而且 `Player.update` 第一件事就是读 input）。只挑"装备"这一层方法共享，
+ * 是最小的一刀，也不会把玩家的状态机漏给队友。 */
+Ally.prototype.gainShield = Player.prototype.gainShield;
+Ally.prototype.gainTempWpn = Player.prototype.gainTempWpn;
+Ally.prototype._tempWpnOf = Player.prototype._tempWpnOf;
+Ally.prototype.gainTempAlly = Player.prototype.gainTempAlly;
+Ally.prototype._updateTemp = Player.prototype._updateTemp;
+Ally.prototype._fireTemp = Player.prototype._fireTemp;
+Ally.prototype._updateTempAlly = Player.prototype._updateTempAlly;
+Ally.prototype.addOrbit = Player.prototype.addOrbit;
+Ally.prototype._updateOrbits = Player.prototype._updateOrbits;
+Ally.prototype._drawOrbits = Player.prototype._drawOrbits;
+Ally.prototype.addOption = Player.prototype.addOption;
+Ally.prototype._updateOptions = Player.prototype._updateOptions;
+Ally.prototype._drawOptions = Player.prototype._drawOptions;
+Ally.prototype._drawShield = Player.prototype._drawShield;
+Ally.prototype._drawTempAlly = Player.prototype._drawTempAlly;
+
+/* `isPlayer` 用来区分"这套共享代码现在跑在谁身上"：
+ * 只有玩家需要播提示、震屏、补无敌。写成原型常量而不是构造里赋值，
+ * 是为了让共享方法里的 `this.isPlayer` 判断始终有值（漏了就是 undefined，
+ * 表现为"玩家的音效忽然没了"，不报错）。 */
+Player.prototype.isPlayer = true;
+Ally.prototype.isPlayer = false;
 
 /* ---------------------------------------------------------------- 敌机 */
 class Enemy {
