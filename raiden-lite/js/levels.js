@@ -253,11 +253,17 @@ const BOSS_PARTS = {
 
 /* ---------------------------------------------------------------- BOSS 弹幕 */
 
+/* 每个 pattern 都从 `const p = b.tgt || game.player` 取目标（3.87）。
+ *  `b.tgt` 由 `Boss._bossFire()` 在调用前挂上：按 `ALLY.tauntBoss` 概率换成
+ *  某架队友，pattern 返回后立刻清空。这样"引仇恨"只需要改 Boss 一处，
+ *  九个 pattern 的弹幕逻辑一行都不用动。
+ *  注意只影响"算角度打人"的那一路：环形 / 螺旋 / 弹幕墙本来就按固定角度铺，
+ *  根本不读 `p`，天然不受影响——它们不是"追人"，是"读招"。 */
 const BOSS_PATTERNS = {
 
   /* 苍鹰母舰：扇形散射 → 双炮台瞄准 → 螺旋 */
   boss1(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
     if (b.phase === 0) {
       for (let i = -3; i <= 3; i++) {
@@ -315,7 +321,7 @@ const BOSS_PATTERNS = {
 
   /* 岩甲巨蟹：抛石 → 钳击冲撞 → 落石 + 环形 */
   boss2(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     if (b.phase === 0) {
       for (let i = 0; i < 4; i++) {
         const vx = rand(-90, 90) + (p.x - b.x) * 0.4;
@@ -359,7 +365,7 @@ const BOSS_PATTERNS = {
 
   /* 深渊之眼：环形 → 双向螺旋 → 环形 + 瞄准 */
   boss3(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     if (b.phase === 0) {
       const n = 18;
       for (let i = 0; i < n; i++) {
@@ -398,7 +404,7 @@ const BOSS_PATTERNS = {
 
   /* 轨道堡垒：六向散射 → 旋转射线 → 全向环 + 瞄准 */
   boss4(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     if (b.phase === 0) {
       for (let i = 0; i < 8; i++) {
         const a = b.ang + (i / 8) * Math.PI * 2;
@@ -435,7 +441,7 @@ const BOSS_PATTERNS = {
 
   /* 极光母舰：棱镜十字 → 环形 + 侧翼炮 → 螺旋；侧翼被打掉后弹幕变稀 */
   boss6(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
     const alive = b.partsAlive();
 
@@ -476,7 +482,7 @@ const BOSS_PATTERNS = {
 
   /* 虚空之主：单环 → 双环反向 → 狂暴全向 + 精准；召唤后进入狂暴 */
   boss7(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
     const alive = b.partsAlive();
 
@@ -519,7 +525,7 @@ const BOSS_PATTERNS = {
 
   /* 裂殖之核：双核交替 → 环形 + 瞄准 → 双股反向螺旋 */
   boss8(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
     const half = b.w * 0.20;
 
@@ -564,7 +570,7 @@ const BOSS_PATTERNS = {
 
   /* 终焉星环：五阶段，每段换一种压迫方式 */
   boss9(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
 
     // 0 环形（100~80%）
@@ -653,7 +659,7 @@ const BOSS_PATTERNS = {
 
   /* 熔核核心：三向扇形 → 双螺旋 + 抛石 → 狂暴全屏 */
   boss5(b, game) {
-    const p = game.player;
+    const p = b.tgt || game.player;   // 3.87：本轮目标可能是被引走的队友
     const aim = Math.atan2(p.y - b.y, p.x - b.x);
     if (b.phase === 0) {
       for (let i = -1; i <= 1; i++) {

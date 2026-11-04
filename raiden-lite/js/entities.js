@@ -2265,6 +2265,7 @@ class Enemy {
     this.laserT = 0;
     this.laserAng = Math.PI / 2;
     this.laserCd = 0;
+    this.laserTgt = null;     // 蓄力跟随对象（3.88，可能是队友）——池对象，必须复位
     if (this.laserCfg) {
       const lcd = this.laserCfg.cd || 6;   // 没配冷却也能量出来，别留 NaN（NaN 比较恒 false = 永不冷却）
       /* 首发冷却（3.71）：原来取 `rand(0.45cd, cd)`——狙击机 cd 7.6 秒，
@@ -2823,15 +2824,21 @@ class Enemy {
      * 注意 snipe 不吃这个覆盖（狙击机没有配 nonAim，配了也会变成朝前打慢弹）。 */
     /* 敌人偶尔把枪口转向队友（3.75）：这是"吸引火力"的第二层——
      * 挡弹是被动吃掉打向玩家的弹，改瞄是**主动**把弹流引走。
-     * 三条约束：
+     * 两条约束：
      *  1. 只给瞄准型（`!def.nonAim`）：直射型的语义是"成排压下来铺一堵墙"，
      *     让它拐弯去瞄队友，队形就读散了（那正是 3.53 加 nonAim 要解决的）；
-     *  2. 狙击机（`snipe`）不参与：卖点是"慢起快收 + 看得见的准星"，
-     *     拐向队友之后玩家根本不用躲，这套读招就废了；
-     *  3. **每次开火 roll 一次**，不在弹与弹之间 roll —— 一组 fan3/fan5 是一次瞄准，
+     *  2. **每次开火 roll 一次**，不在弹与弹之间 roll —— 一组 fan3/fan5 是一次瞄准，
      *     逐发 roll 会让五发分裂成两个走向，读起来像乱打。
-     * BOSS 的弹幕不在这里（走 `BOSS_PATTERNS` 的编排），刻意不参与：
-     * 那是"读招"，不是"追人"。 */
+     * 环形（`ring`）不参与：它按固定角度铺一圈，本来就不读目标。
+     * BOSS 的弹幕不在这里（走 `BOSS_PATTERNS` 的编排），见 `Boss._aimTarget()`。
+     *
+     * 狙击弹（`snipe`）**不参与**（3.75 排除，3.88 短暂放开，3.89 收回）：
+     * 3.88 放开是因为狙击机是第 6/9 关主力（一关几十架），排除它等于那两关
+     * 弹流全指向玩家、玩家读作"仇恨没做"。实测下来反过来的问题更明显——
+     * 狙击弹的卖点就是"看得见的准星对准你"，几十架一起改瞄之后玩家看到的
+     * 是"整片准星都在别处"，那一关的压迫感直接消失。
+     * 所以狙击弹恢复只锁玩家；它承担的是"必须横移"那门课，不参与分担。
+     * 狙击机的**瞄准光柱**（`laserTgt`，第 9 关）仍然参与，那是另一套机制。 */
     let tgt = p;
     if (!this.def.nonAim && mode !== 'snipe' && mode !== 'ring'
       && game.allies.length && Math.random() < ALLY.taunt) {
@@ -2930,9 +2937,17 @@ class Enemy {
       }
       this.laserState = 1;
       this.laserT = cfg.charge;
-      /* 初始方向：瞄准型朝玩家；横向型朝玩家那一侧（side 实际是贯穿线，
-       * 这个角度只影响蓄力光束从哪头亮起）；朝下型固定 +90°。 */
-      if (cfg.mode === 'aim') this.laserAng = Math.atan2(p.y - this.y, p.x - this.x);
+      /* 锁定目标（3.88）：瞄准型在"开始蓄力"这一帧选一次，之后跟随到锁定为止。
+       * 以前写死瞄玩家——后期主力的光柱机型全在瞄人，等于这一路完全不受队友影响。
+       * 队友被选中的那几轮，玩家看到光柱在队友身上转，是"吸引火力"最直观的证据；
+       * 目标中途被打掉就回落玩家，别让光柱僵在半空继续指着一个不存在的位置。
+       * 横向型仍是贯穿线（角度只决定从哪头亮起），朝下型固定，都不参与。 */
+      this.laserTgt = p;
+      if (cfg.mode === 'aim' && game.allies.length && Math.random() < ALLY.taunt) {
+        this.laserTgt = game.pickAllyTarget(this) || p;
+      }
+      const lt0 = this.laserTgt;
+      if (cfg.mode === 'aim') this.laserAng = Math.atan2(lt0.y - this.y, lt0.x - this.x);
       else if (cfg.mode === 'side') this.laserAng = p.x >= this.x ? 0 : Math.PI;
       else this.laserAng = Math.PI / 2;
       SFX.laserCharge();
@@ -2943,13 +2958,19 @@ class Enemy {
       this.laserT -= dt;
       /* 蓄力跟随只有瞄准型会转，速率 cfg.track（rad/s）。
        * 0.9 rad/s 意味着 0.8 秒最多转 41°：斜着跑能甩开，站着不动一定被咬住。
-       * 这就是"更高级一点"的全部内容——玩家必须读出它在转，再决定往哪让。 */
-      if (cfg.mode === 'aim' && cfg.track > 0 && p.alive) {
-        const want = Math.atan2(p.y - this.y, p.x - this.x);
-        let diff = want - this.laserAng;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        this.laserAng += clamp(diff, -cfg.track * dt, cfg.track * dt);
+       * 这就是"更高级一点"的全部内容——玩家必须读出它在转，再决定往哪让。
+       * 跟随对象是蓄力开始时选定的那个（可能是队友，见上），死了才回落玩家。 */
+      if (cfg.mode === 'aim' && cfg.track > 0) {
+        const lt = (this.laserTgt && this.laserTgt.alive) ? this.laserTgt : p;
+        // 目标全没了（玩家阵亡且队友也碎）就保持当前角度。**不能 return**——
+        // 下面那句才是蓄力计时，提前退出会让这根光柱永远停在蓄力态。
+        if (lt && lt.alive) {
+          const want = Math.atan2(lt.y - this.y, lt.x - this.x);
+          let diff = want - this.laserAng;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          this.laserAng += clamp(diff, -cfg.track * dt, cfg.track * dt);
+        }
       }
       if (this.laserT <= 0) {
         this.laserState = 1.5;
@@ -3701,6 +3722,10 @@ class Boss {
     this.spiralN = 0;        // boss1 终段螺旋的轮次计数（每 6 轮插一次瞄准齐射）
     this.lastP = null;       // 上一轮的玩家位置，boss1 终段用来估速度做预判
     this.lastPT = 0;
+    /* 本轮弹幕瞄谁（3.87）：`_bossFire` 调用 pattern 前挂上、返回后清空。
+     * 池对象要复位，否则复用后残留的引用会让第一轮弹幕打向已经消失的队友
+     * （`b.tgt` 只在这一帧有意义，但漏复位就会带着旧目标进入下一只 BOSS）。 */
+    this.tgt = null;
     this.lungeX = 0;        // 钳击的横向偏移（叠加在巡游基座上）
     this.lungeTarget = 0;
     this.lungeHold = 0;     // 冲到位置后保持的时间
@@ -4018,8 +4043,14 @@ class Boss {
 
     this.fireT -= dt;
     if (this.fireT <= 0) {
+      /* 本轮瞄谁（3.87）：瞄准类弹幕有概率转向队友。
+       * 挂在这里、pattern 返回后立刻清掉——`BOSS_PATTERNS` 里统一读
+       * `b.tgt || game.player`，所以九个 pattern 的弹幕逻辑一行都不用改，
+       * "引仇恨"只有这一个实现点。 */
+      this.tgt = this._aimTarget(game);
       const pattern = BOSS_PATTERNS[this.sprite];
       const cd = pattern ? pattern(this, game) : 1.2;
+      this.tgt = null;
       /* 全局 0.9 提频 + 关卡自己的 bossRate。
        * bossRate 是 3.28 起给后四关的"出招更快"旋钮：只改这一个乘数，
        * 不用去动每个 pattern 里散落的 1.05/1.4/2.1 秒，
@@ -4035,6 +4066,22 @@ class Boss {
         game.callBossSupport(this);
       }
     }
+  }
+
+  /** 本次开火瞄谁（3.87）：玩家，或按 `ALLY.tauntBoss` 概率换成某架队友。
+   *
+   *  用在哪：`BOSS_PATTERNS` 里"算角度打人"的那一路（扇形 / 抛石 / 钳击 / 瞄准弹）
+   *  和浮游炮。不该用在哪：
+   *    - 环形、螺旋、弹幕墙、召唤物：编排是"铺开"，本来就不读目标，
+   *      转向谁都不会变，硬接反而会让它们变得像在追人；
+   *    - 蓄力激光：玩家按"锁定时的位置"躲，转向队友会让整套预警失效——
+   *      那是 BOSS 唯一的"停手"课，不能被队友代上。
+   *  概率比敌机（0.42）低：BOSS 的枪口朝向是玩家读招的依据，转得太频繁
+   *  就变成"我盯着它看，它却在打别处"。 */
+  _aimTarget(game) {
+    const p = game.player;
+    if (!game.allies.length || Math.random() >= ALLY.tauntBoss) return p;
+    return game.pickAllyTarget(this) || p;
   }
 
   /** 护盾轮转 / 浮游炮 / 镜像武器 / 弹幕墙 / 引力场 */
@@ -4065,7 +4112,10 @@ class Boss {
         // x/y 都要夹进画面：只夹 x 的话，BOSS 贴顶巡游时浮游炮会从 HUD 上方开火
         const px = clamp(this.x + Math.cos(d.ang) * d.r, 36, VIEW.w - 36);
         const py = clamp(this.y + Math.sin(d.ang) * d.r, PLAY_TOP + 12, VIEW.h - 12);
-        const a = Math.atan2(p.y - py, p.x - px);
+        /* 浮游炮也是"瞄准型"：每次开火各自 roll 一次（3.87）。
+         * 和本体共用 `_aimTarget`，概率也共用——它们是同一个"仇恨池"的一部分。 */
+        const t = this._aimTarget(game);
+        const a = Math.atan2(t.y - py, t.x - px);
         game.spawnEnemyBullet(px, py, Math.cos(a) * 235, Math.sin(a) * 235,
           { kind: 'big', r: 12 });
         SFX.enemyShoot();

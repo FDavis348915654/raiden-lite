@@ -876,6 +876,17 @@ class Game {
     return Math.hypot(px - cx, py - cy);
   }
 
+  /** 一个点是否碰到"一组线段"中的任意一条（3.86）。
+   *  玩家和队友共用同一把尺子：`segs` 来自 `laserSegs()`，`half` 是
+   *  "光束半宽 + 该单位的判定半径"。两边半径不同（PLAYER.hitR / ALLY.hitR），
+   *  所以 half 由调用方算好传进来，不要在这里写死。 */
+  _segTouch(x, y, segs, half) {
+    for (const s of segs) {
+      if (this._pointSegDist(x, y, s.x1, s.y1, s.x2, s.y2) < half) return true;
+    }
+    return false;
+  }
+
   /** 通用大字提示（栅栏 / 中央弹幕等机制用） */
   _bigToast(title, sub, color) {
     this.bigToastT = 1.8;
@@ -3313,14 +3324,28 @@ class Game {
 
     if (!p.alive) return;
 
-    // BOSS 蓄力激光：点到线段距离判定，接触宽度的一半即命中
+    /* BOSS 蓄力激光：点到线段距离判定，接触宽度的一半即命中。
+     *
+     * 队友同样吃伤害（3.86）。激光是"空间里持续存在的一条线"，不是一颗弹——
+     * 它不会被站在前面的人吃掉，三个人站在同一条光柱上都该掉血；
+     * 这和子弹那条"命中就销毁、只结算一个人"的规则是两回事。
+     * 护盾不挡激光：`_shieldBlock` 只处理子弹，玩家那边也是"盾照吃弹、
+     * 激光照扣血"，两边规则必须一致，否则队友反而比玩家多一层免伤。 */
     if (this.bossActive && this.boss.laserState === 2 && !this.god) {
       const b = this.boss;
       const ex = b.x + Math.cos(b.laserAng) * 1600;
       const ey = b.y + Math.sin(b.laserAng) * 1600;
-      const d = this._pointSegDist(p.x, p.y, b.x, b.y, ex, ey);
-      if (d < b.laserCfg.width * 0.5 + PLAYER.hitR) {
-        p.hit(this, PLAYER.bulletDmgBig);
+      const halfW = b.laserCfg.width * 0.5;
+      /* 先结算队友：玩家这一发可能被打死，而下面的 `if (!p.alive) return`
+       * 会直接退出整层碰撞，队友就白站了一次光柱。 */
+      for (const a of this.allies) {
+        if (!a.alive) continue;
+        if (this._pointSegDist(a.x, a.y, b.x, b.y, ex, ey) < halfW + ALLY.hitR) {
+          a.hit(this, PLAYER.bossLaserDmg);
+        }
+      }
+      if (this._pointSegDist(p.x, p.y, b.x, b.y, ex, ey) < halfW + PLAYER.hitR) {
+        p.hit(this, PLAYER.bossLaserDmg);
         if (!p.alive) return;
       }
     }
@@ -3328,29 +3353,43 @@ class Game {
     /* 敌机激光（3.68）：和 BOSS 激光同一套点到线段判定，但只有一半宽、20 伤。
      * 它是"封锁线"不是"处决技"——玩家可以绕，也可以硬顶一次（掉两成血），
      * 这个取舍才是它存在的理由；做成碰到就死就只剩"等它结束"一种玩法。
-     * 命中一条就跳出：同一帧被第二条扫到没有额外意义（p.hit 自己也有无敌守卫）。 */
+     *
+     * 队友也吃（3.86）：以前这里只有 `p.hit`，队友能从光柱中间穿过去，
+     * 看起来像贴图穿模。判定方式和玩家共用 `_segTouch`，只是半径换成 ALLY.hitR。
+     * 玩家的"一帧只吃第一条"用 `zapped` 表达，**不能写成跳出整个循环**：
+     * 那样站得靠后的队友会因为前一条光柱已命中玩家而完全免疫。 */
     if (!this.god) {
+      let zapped = false;
       for (const e of this.enemies) {
         if (!e.active || e.laserState !== 2) continue;
         const segs = e.laserSegs();
         if (!segs) continue;
-        const half = (e.laserCfg.width || 10) * 0.5 + PLAYER.hitR;
-        let touch = false;
-        for (const s of segs) {
-          if (this._pointSegDist(p.x, p.y, s.x1, s.y1, s.x2, s.y2) < half) { touch = true; break; }
+        const halfW = (e.laserCfg.width || 10) * 0.5;
+        const dmg = e.laserCfg.dmg || ENEMY_LASER.dmg;
+        if (!zapped && p.alive && this._segTouch(p.x, p.y, segs, halfW + PLAYER.hitR)) {
+          p.hit(this, dmg);
+          zapped = true;
         }
-        if (!touch) continue;
-        p.hit(this, e.laserCfg.dmg || ENEMY_LASER.dmg);
-        break;
+        for (const a of this.allies) {
+          if (!a.alive) continue;
+          if (this._segTouch(a.x, a.y, segs, halfW + ALLY.hitR)) a.hit(this, dmg);
+        }
       }
       if (!p.alive) return;
     }
 
-    // 双栅栏：碰到垂直能量柱受伤
+    /* 双栅栏（BOSS 技能的垂直能量柱）：同一套"线"的语义，队友也吃。
+     * 这里宽度是写死的 7（不是激光配置），两边半径各自加。 */
     if (this.bossActive && !this.god && this.boss.fenceOn > 0) {
       const fx = this.boss.fenceX;
-      const halfW = 7 + PLAYER.hitR;
-      if (Math.abs(p.x - fx) < halfW || Math.abs(p.x - (VIEW.w - fx)) < halfW) {
+      const fx2 = VIEW.w - fx;
+      for (const a of this.allies) {
+        if (!a.alive) continue;
+        if (Math.abs(a.x - fx) < 7 + ALLY.hitR || Math.abs(a.x - fx2) < 7 + ALLY.hitR) {
+          a.hit(this, PLAYER.bulletDmgBig);
+        }
+      }
+      if (Math.abs(p.x - fx) < 7 + PLAYER.hitR || Math.abs(p.x - fx2) < 7 + PLAYER.hitR) {
         p.hit(this, PLAYER.bulletDmgBig);
         if (!p.alive) return;
       }
@@ -4715,11 +4754,21 @@ class Game {
       ctx.stroke();
     }
 
+    /* 队友判定（3.86）：3.73 起队友就有 `ALLY.hitR` 的吃弹圆，
+     * 但调试层一直只画玩家。这条判定既吃子弹也吃激光（这次补的就是激光那一路），
+     * 属于"必须能看见"的那一类。用冷青而不是玩家的粉色：一眼分开谁是本体。 */
+    for (const a of this.allies) {
+      if (!a.alive) continue;
+      ring(a.x, a.y, ALLY.hitR, 'rgba(120,220,255,0.95)', 1.4);
+    }
+
     // 护盾：半椭圆判定（上半个 + 截口）。只在装盾时出现，形状要和 _drawShield 一致，
     // 否则调试层会显示"一个圈"，玩家以为背后也挡得住
-    if (p.alive && p.shield) {
+    // 队友装盾走的是同一个 `_shieldBlock`（3.85），所以同一套形状要一起画。
+    for (const h of [p].concat(this.allies)) {
+      if (!h.alive || !h.shield) continue;
       const C = TEMP.shield;
-      const sx = p.x, sy = p.y - C.oy;
+      const sx = h.x, sy = h.y - C.oy;
       // 用品红而不是青色：护盾本身是青蓝，同色线框会被外缘吃掉，分不清哪圈才是判定
       ctx.strokeStyle = 'rgba(255,120,225,0.95)';
       ctx.lineWidth = 1.2;
