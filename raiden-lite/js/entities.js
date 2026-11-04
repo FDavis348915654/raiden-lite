@@ -2211,7 +2211,11 @@ class Enemy {
     this.sprite = def.sprite;
     this.w = sz.w;
     this.h = sz.h;
-    this.hp = opt.hp || def.hp;
+    /* 动态难度（3.90）：小 BOSS 出场时 `_spawnEnemy` 会传 dynMul，血与分一起放大。
+     * 召唤援军走 summonBossMinions、不传这个字段，于是恒定 1——它们是 BOSS 战里的
+     * "量"，难度已由 BOSS 本体血量承担，再乘一次会让第 7 关的退场段清不完。 */
+    this.hp = Math.round((opt.hp || def.hp) * (opt.dynMul || 1));
+    this.scoreMul = opt.dynMul || 1;
     this.speed = opt.speed || def.speed;
     this.elite = !!opt.elite;
     this.scale = def.scale || 1;
@@ -3699,14 +3703,22 @@ class Enemy {
 class Boss {
   constructor() {
     this.active = false;
+    this.scoreMul = 1;   // 动态难度（3.90）：出场时按战力重算，见 init()
   }
 
-  init(stage) {
+  init(stage, power) {
     this.seq = ++ENEMY_SPAWN_SEQ;   // 和 Enemy 共用一套序号，追踪弹不必分类型判断
     this.stage = stage;
     this.sprite = stage.boss;
     this.name = stage.bossName;
-    this.maxHp = stage.bossHp;
+    /* 动态难度（3.90）：出场这一帧按玩家战力定血，之后锁定不再变。
+     * 部件血量由 maxHp 的比例算出（dHp / pd.ratio），所以炮台会跟着一起变厚——
+     * 这是刻意的：时间变长不能只让本体变厚、炮台仍旧两枪就碎。
+     * scoreMul 与血量同比，多打的血换成分，否则"更强的玩家打更久"纯亏。 */
+    const pw = clamp(power || 0, 0, DYN.cap);
+    this.hpMul = 1 + DYN.hpMax * pw;
+    this.maxHp = Math.round(stage.bossHp * this.hpMul);
+    this.scoreMul = this.hpMul;
     this.hp = this.maxHp;
     this.x = VIEW.w / 2;
     this.y = -200;

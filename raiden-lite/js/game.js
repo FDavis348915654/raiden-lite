@@ -734,8 +734,24 @@ class Game {
     SFX.warn();
   }
 
+  /* 玩家战力（3.90，0~DYN.cap）：BOSS 与小 BOSS 出场时用来定血量和分数。
+   * 分母固定用 WEAPON_SLOTS 而不是"已拥有槽数"——槽少本身就是弱，
+   * 拿已拥有槽当分母的话，两槽 L5 会和四槽 L5 一样算满，等于没区分。
+   * 临时武器 / 护盾只给很小的权重：它们是限时的，出场那一刻有、十秒后未必还在，
+   * 权重给大了会变成"捏着一件追踪弹去打 BOSS 就能骗到血条"。 */
+  playerPower() {
+    const p = this.player;
+    if (!p) return 0;
+    let lv = 0;
+    for (const v of p.lv) lv += v;
+    const base = lv / (WEAPON_SLOTS * 5);
+    const ally = this.allies.length * DYN.allyW;
+    const temp = p.tempWpns.length * DYN.tempW + (p.shield ? DYN.tempW : 0);
+    return clamp(base + ally + temp, 0, DYN.cap);
+  }
+
   spawnBoss() {
-    this.boss.init(this.level);
+    this.boss.init(this.level, this.playerPower());
     this.bossActive = true;
     this.state = 'boss';
     // 3.7.0：BOSS 相关演出不再震全局镜头，改成机身自己颤
@@ -957,7 +973,8 @@ class Game {
   }
 
   onBossKilled(b) {
-    this.score += SCORE.bossKill;
+    // 动态难度（3.90）：血量按战力放大过，分数同比给，见 DYN 的注释
+    this.score += Math.round(SCORE.bossKill * (b.scoreMul || 1));
     this.bossActive = false;
     this.state = 'clear';
     this.clearT = 5.5;
@@ -1643,7 +1660,8 @@ class Game {
 
     // 3.3.0 血量上调后阈值同步提高：否则连 fighter(11) 都算“大爆”，满屏震屏
     const big = e.maxHp >= 35 || e.elite;
-    this.score += e.def.score * (e.elite ? 5 : 1);
+    // 动态难度（3.90）：小 BOSS 的血是按战力放大的，分数同比跟上
+    this.score += Math.round(e.def.score * (e.elite ? 5 : 1) * (e.scoreMul || 1));
     this.explode(e.x, e.y, big ? 1.25 : 0.7, e.elite ? '#ffd166' : this.level.accent, big ? 18 : 9);
     SFX.explode(big);
     // 击破敌机不震屏：一关打一百多架，震屏会变成持续噪音。
@@ -2379,6 +2397,11 @@ class Game {
 
     // 中型机：按编队位置分到 0.24W ~ 0.76W 的车道，否则三架会一起飞到屏幕中心叠成一架
     const isMini = isMiniKind(q.kind);
+    /* 小 BOSS 也吃动态难度（3.90）：出场这一帧算一次并固化。
+     * 只认 `isMini`，不认"长得厚"的机型——杂兵一关几十架，按战力加血会把
+     * 漏怪率整体推高，而小 BOSS 是全关唯一需要读招的检查点，加血是在补它的分量。
+     * 小 BOSS 用独立倍率：它基础只有 400 血，照 BOSS 那档加三成八等于没加。 */
+    const dynMul = isMini ? 1 + DYN.miniHpMax * this.playerPower() : 1;
     const laneX = VIEW.w * (0.24 + (q.slot === undefined ? 0.5 : q.slot) * 0.52);
 
     // 警示标记也按车道放，不然三个红柱会叠在同一处
@@ -2394,6 +2417,7 @@ class Game {
     // 对从底部升起的单位没有意义，用了反而会斜着爬升
     e.init(q.kind, isMini ? laneX : q.x, y, {
       hp: q.hp,
+      dynMul: dynMul,
       speed: q.speed,
       elite: elite,
       fromBottom: fromBottom,
