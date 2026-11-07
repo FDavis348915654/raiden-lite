@@ -791,7 +791,7 @@ class Player {
       this.shield.t = Math.min(C.maxDur, this.shield.t + C.dur);
       this.shield.hp = C.hp;
     } else {
-      this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0, jit: 0 };
+      this.shield = { hp: C.hp, max: C.hp, t: C.dur, hitT: 0, jit: 0, ramT: 0 };
     }
     game.onTempGain(this, 'shield');
   }
@@ -839,6 +839,7 @@ class Player {
       sh.t -= dt;
       if (sh.hitT > 0) sh.hitT -= dt;
       if (sh.jit > 0) sh.jit -= dt;      // 挡弹抖动的衰减（只影响绘制，不影响判定）
+      if (sh.ramT > 0) sh.ramT -= dt;    // 盾挡撞机的限流（3.96），只影响判定
       if (sh.t <= 0 || sh.hp <= 0) {
         /* 被打穿 ≠ 时间到（3.45）：只有"耐久没了但时间还在"才算打穿，
          * 这时补一口血。时间到就正常消失，不给白送的血——
@@ -1083,7 +1084,14 @@ class Player {
        * 只动常规开火：全弹发射（OVERDRIVE.shapes.laser）是满级后的限时爆发，
        * 那套数值按"一轮 2.6 秒"单独调，不吃这档下调。 */
       case 'laser': {
-        const dmg = [4.0, 2.9, 2.55, 2.4, 2.25][p - 1];
+        /* 3.96：再降一档（4.0/2.9/2.55/2.4/2.25 → 3.6/2.6/2.3/2.15/2.05）。
+         * 3.94 降过 9% 之后它仍然是"换到就等于换了个难度"：
+         * 全屏射程 + 穿透 + 1500 弹速，一条线能同时结算两三个目标，
+         * 单发不需要比火神炮高太多就已经是全场总伤第一。
+         * 这次按"总伤而不是单发"收回——L5 单槽 86 → 约 76 DPS，
+         * 仍高于火神炮（约 43）与追踪导弹（约 35），因为穿透与射程
+         * 本来就是它多出来的那部分价值，不该再叠一层最高单发。 */
+        const dmg = [3.6, 2.6, 2.3, 2.15, 2.05][p - 1];
         for (let i = 0; i < p; i++) {
           const off = (i - (p - 1) / 2) * 11;
           game.spawnPlayerBullet(bx + off, by - 24, 0, -1500, dmg,
@@ -3238,7 +3246,11 @@ class Enemy {
       this.x = this.centerX;
       this.ramState = 0;
       this.arriveT = this.t;             // 巡游相位归零，正好接回中心
-      this.fireT = 2.2;
+      /* 3.96：2.2 → 1.1，跟着 fireCd 一起减半。冲角型的实际开火周期不是 fireCd
+       * 一个数决定的——它是"俯冲 0.7 + 冲刺 1.3 + 爬回 ~1.5 + 这段等待"，
+       * 只把 ENEMY_DEFS.mbRam.fire 减半的话，它仍然要等 2.2 秒才扑下一次，
+       * 玩家体感是"别的都变快了，就它没变"。 */
+      this.fireT = 1.1;
     }
   }
 

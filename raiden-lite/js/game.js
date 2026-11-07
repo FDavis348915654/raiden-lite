@@ -3189,13 +3189,52 @@ class Game {
        * 3.85 之前抽出来的这段调的是 `onTempEnd`，于是 `_updateTemp` 里那条
        * "`broke` 才回血"的分支**永远走不到**（盾在碰撞层就被置空了），
        * 破盾回血是死代码——玩家从来没拿到过那 15 点。 */
-      const heal = TEMP.shield.breakHeal;
-      if (heal > 0) {
-        host.hp = Math.min(host.maxHp, host.hp + heal);
-        this.onShieldBreak(host, heal);
-      } else {
-        this.onTempEnd(host, 'shield');
-      }
+      this._breakShield(host);
+    }
+    return true;
+  }
+
+  /** 护盾碎的收尾（3.96 从 `_shieldBlock` 抽出来，撞机那条路也要用同一份）。
+   *  回血 + 提示必须成对：只回血不提示，玩家只会觉得"血条自己涨了一点"；
+   *  只提示不回血，那是把救命道具的最后一格也拿走。 */
+  _breakShield(host) {
+    const heal = TEMP.shield.breakHeal;
+    if (heal > 0) {
+      host.hp = Math.min(host.maxHp, host.hp + heal);
+      this.onShieldBreak(host, heal);
+    } else {
+      this.onTempEnd(host, 'shield');
+    }
+  }
+
+  /** 护盾挡撞机（3.96）：扣耐久、敌机掉血、本体不掉血。
+   *  返回 true 表示这一撞已经被盾接下，调用方不要再走 `Player.hit`。
+   *
+   *  三个参数各管一件事：
+   *  - `power`：敌机该吃的伤害。玩家那条是 `max(30, maxHp × 0.7)`、
+   *    队友是固定的 `ALLY.ramPower`，口径不同所以由调用方算好传进来，
+   *    这里只负责"盾替机体吃下这次碰撞"；
+   *  - `dealDmg`：冲角型俯冲段与蛇整条都不吃撞机伤（原有规则），
+   *    关掉伤害但盾照样扣耐久——它仍然是"挡了一下"；
+   *  - 耗时用盾自己的 `ramT` 限流：盾挡撞机不进 `Player.hit`，
+   *    也就没有 1.6 秒受击无敌兜底，不留这个计时器的话贴身一帧扣一次。 */
+  _shieldRam(host, e, power, dealDmg) {
+    const sh = host.shield;
+    if (!sh) return false;
+    if (sh.ramT > 0) return false;
+    const C = TEMP.shield;
+    sh.ramT = C.ramCd;
+    sh.hp -= C.ramCost;
+    sh.hitT = 0.12;
+    sh.jit = C.jit;
+    if (dealDmg && e.ai !== 'snake') e.hit(power, null, this, { ignoreShield: true });
+    this.addParticle(e.x, e.y, {
+      vx: rand(-60, 60), vy: rand(-70, -10), life: 0.24, r: 4.5, color: '#9fe8ff'
+    });
+    SFX.hit();
+    if (sh.hp <= 0) {
+      host.shield = null;
+      this._breakShield(host);
     }
     return true;
   }
@@ -3537,7 +3576,19 @@ class Game {
         if (!ramming && e.ai !== 'snake') {
           e.hit(Math.max(30, e.maxHp * PLAYER.ramEnemyDmg), null, this, { ignoreShield: true });
         }
+        /* 3.96：有盾时先让盾吃这一撞——扣耐久、敌机照样掉血、本体不掉。
+         * 排在 `p.hit` 之前，是因为盾挡住就不该再结算伤害；
+         * 也不能只把 `ramDmg` 改小：那样玩家仍会掉血、仍会掉武器等级，
+         * "罩住机头的盾"在手感上还是漏了一块。 */
         if (this.god) continue;
+        /* 有盾就一律由盾承担，不走 `p.hit`：
+         * `_shieldRam` 自己会用 `ramT` 限流，所以冷却期内的第二帧什么也不做——
+         * 写成"返回 true 才 continue"的话，冷却那 0.6 秒会漏回旧的掉血分支，
+         * 表现是"盾还在、人却在掉血"，比完全不挡更让人困惑。 */
+        if (p.shield) {
+          this._shieldRam(p, e, Math.max(30, e.maxHp * PLAYER.ramEnemyDmg), !ramming);
+          continue;
+        }
         p.hit(this, PLAYER.ramDmg);
         if (!p.alive) return;
       }
@@ -3562,6 +3613,16 @@ class Game {
         if (!a.alive || a.ramT > 0) continue;
         const rr = ALLY.hitR + e.r * 0.8;
         if (dist2(a.x, a.y, e.x, e.y) >= rr * rr) continue;
+        /* 3.96：队友的盾同样吃撞机。它自己已经有 `ramT` 限流，
+         * 但撞机段先判的是本体冷却，所以这里仍要设——否则盾挡完这一下，
+         * 下一帧又会因为"本体没受伤"而重新进入同一个分支。
+         * 有盾就一直走盾这条：`_shieldRam` 的 `ramT` 会挡住重复结算，
+         * 不能因为冷却中又被旧分支扣一次本体血。 */
+        if (a.shield) {
+          this._shieldRam(a, e, ALLY.ramPower, true);
+          if (!e.active) break;
+          continue;
+        }
         if (e.ai !== 'snake') e.hit(ALLY.ramPower, null, this, { ignoreShield: true });
         this.addParticle(a.x, a.y, {
           vx: rand(-50, 50), vy: rand(-70, -10), life: 0.2, r: 3.5, color: a.col
