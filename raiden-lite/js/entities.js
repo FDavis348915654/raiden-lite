@@ -916,6 +916,13 @@ class Player {
         boom: { r: C.boomR, dmg: C.boomDmg * mul }
       });
       if (this.isPlayer) SFX.shoot();
+      /* 弹夹式连发（3.101）：一组 3 发，发与发之间只隔 burstGap，
+       * 打完最后一发才进 `cd`（2.4 秒）的装填。
+       * 计数存在 `tw` 上（每件道具一份），所以玩家和队友各算各的；
+       * 漏写这一步就会退回"每 2.4 秒打一发"，比原来的匀速还空。 */
+      tw.salvo = (tw.salvo || 0) + 1;
+      if (tw.salvo < C.burst) return C.burstGap;
+      tw.salvo = 0;
       return C.cd;
     }
     if (tw.id === 'thunder') {
@@ -1051,17 +1058,20 @@ class Player {
         break;
       }
 
-      /* 散射炮：一次齐射，扇面同时铺开，射程只有 0.40 屏高、张角 60°。
+      /* 散射炮：一次齐射，扇面同时铺开，射程只有 0.32 屏高（3.99）、张角 60°。
        * 速度恒定 780，所以把 life 直接算成 路径长度/速度 ——
        * 这样扇形里每一发的路径长度一致，远端边界会连成一条干净的弧。
-       * 单发比同级的火神炮重（2.8 vs 2.4）：射程砍短之后命中窗口变少，
-       * 靠单发更痛来补偿，否则多档火力下散弹会彻底被火神炮比下去。 */
+       * 3.99：单发 2.8/2.55/2.4/2.4/2.3 → 5.2/4.6/4.2/3.9/3.7，射程 0.40 → 0.32 屏。
+       * 它的定位正式改成"主武器里单发最痛的一把"（L5 3.7 超过等离子的 3.65）：
+       * 60° 扇面铺开，站着不动时只有正对的两三发能命中，单发不给够就只是热闹；
+       * 贴到 100px 以内时几乎全中，一轮就是 25~60 点——这份爆发必须用射程换，
+       * 否则"远处也能全中"就成了没有代价的最强枪。
+       * 名义 DPS 看似涨了一倍（17×3.7/0.34 ≈ 185），实际命中率只有 15% 上下，
+       * 中距离真实 DPS 约 35，贴脸才到 90+，梯度正是它该有的形状。 */
       case 'spread': {
-        // 5 级齐射 5 / 8 / 11 / 14 / 17 发，铺满 60°（1.047 rad）；
-        // 单发 2.8 → 2.3，满级弹数比旧版多两成但总伤害持平，
-        // 射速在 config 里压到 0.34s，避免"弹数翻倍 + 高频"直接把 DPS 拉爆
+        // 5 级齐射 5 / 8 / 11 / 14 / 17 发，铺满 60°（1.047 rad）
         const n = [5, 8, 11, 14, 17][p - 1];
-        const dmg = [2.8, 2.55, 2.4, 2.4, 2.3][p - 1];
+        const dmg = [5.2, 4.6, 4.2, 3.9, 3.7][p - 1];
         const total = 1.047;                 // 60°
         const life = SPREAD_RANGE / 780;
         for (let i = 0; i < n; i++) {
@@ -1076,22 +1086,17 @@ class Player {
        * 单发 4.4 → 2.45，五条并排时总伤与旧版三条持平，
        * 视觉上是"光束变粗"，判定仍是各自独立的细柱（r10）。
        *
-       * 3.94：再降约 9%（4.4/3.2/2.8/2.6/2.45 → 4.0/2.9/2.55/2.4/2.25）。
-       * 它是全场唯一"全屏射程 + 穿透"的主武器，弹速 1500 又几乎没有飞行时间，
-       * L5 的 102 DPS 明显压过同级的火神炮（约 43）和追踪导弹（约 34）——
-       * 穿透这条属性已经让它一条线能穿两三个目标，单发就不该再按最高档给。
-       * 压到 93.75 DPS 后仍是单点最强的一把，只是不再"换到它就等于换了个难度"。
+       * 3.99：3.6/2.6/2.3/2.15/2.05 → 2.6/1.9/1.7/1.55/1.45（约 -28%）。
+       * 它的优势从头到尾只有一条：**穿透**。全屏射程 + 1500 弹速让一条线
+       * 能同时结算两三个目标，所以单发价值应该排在"单点爆发"那一档之下——
+       * 之前它一边吃穿透的多目标收益、一边拿着第二高的单发，
+       * 于是不管打单体还是打群都比别人强，玩家没有理由换别的枪。
+       * 现在 L5 单槽约 55 DPS（原来 76），低于火神炮的持续压制、
+       * 更远低于散射炮的贴脸爆发，它的位置回到"清直线上的一串"。
        * 只动常规开火：全弹发射（OVERDRIVE.shapes.laser）是满级后的限时爆发，
        * 那套数值按"一轮 2.6 秒"单独调，不吃这档下调。 */
       case 'laser': {
-        /* 3.96：再降一档（4.0/2.9/2.55/2.4/2.25 → 3.6/2.6/2.3/2.15/2.05）。
-         * 3.94 降过 9% 之后它仍然是"换到就等于换了个难度"：
-         * 全屏射程 + 穿透 + 1500 弹速，一条线能同时结算两三个目标，
-         * 单发不需要比火神炮高太多就已经是全场总伤第一。
-         * 这次按"总伤而不是单发"收回——L5 单槽 86 → 约 76 DPS，
-         * 仍高于火神炮（约 43）与追踪导弹（约 35），因为穿透与射程
-         * 本来就是它多出来的那部分价值，不该再叠一层最高单发。 */
-        const dmg = [3.6, 2.6, 2.3, 2.15, 2.05][p - 1];
+        const dmg = [2.6, 1.9, 1.7, 1.55, 1.45][p - 1];
         for (let i = 0; i < p; i++) {
           const off = (i - (p - 1) / 2) * 11;
           game.spawnPlayerBullet(bx + off, by - 24, 0, -1500, dmg,
@@ -2315,6 +2320,15 @@ class Enemy {
     this.pathR = opt.pathR || 72;
     this.hoverT = 0;
     this.arriveT = 0;
+    /* 3.98：小 BOSS"是否已经爬到位"改用显式标记。
+     * 原来靠 `y > 216` 判断，而巡游阶段 y 是 `216 + sin(mt*1.3) * 8`
+     * ——正弦波有一半的帧落在 216 之上，于是那些帧被当成"还在爬升"：
+     * ①`fireT` 只有一半的帧在递减，**实际射速永远只有配置值的一半**；
+     * ②机身被爬升分支用 220px/s 往下拽一帧，再被正弦写回来，
+     *   读起来是原地抖动而不是左右摆动；
+     * ③`x` 被爬升分支往 `centerX` 收敛，sweep 的摆幅也跟着缩水。
+     * 这也是"小 BOSS 一直没什么存在感"的根因之一：它既不认真摆，也不认真开火。 */
+    this.arrived = false;
     this.entry = opt.entry || null;   // 'left' / 'right'：从屏幕侧面斜切进入
     this.entryIn = 0;                 // 已经进入视野的时长
     this.rotFix = 0;                  // 入场结束后的姿态回正计时
@@ -2771,7 +2785,8 @@ class Enemy {
         // 表现为原地上下抖动、永远冲不下来。
         if (this.def.mb === 'ram' && this.ramState !== 0) {
           this._ramMove(dt);
-        } else if (this.y > 216) {
+        } else if (!this.arrived) {
+          // 判据是"到没到位"，不是 `y > 216`——巡游的正弦本来就在 216 上下摆
           // 掉头用 0.45 秒旋转过渡：原先到顶那一帧 π → 0 直接翻转，看着很生硬
           const TURN_DUR = 0.55;
           const turnY = 216 + 220 * TURN_DUR;
@@ -2789,6 +2804,7 @@ class Enemy {
           if (this.y <= 216) {
             this.y = 216;
             this.rot = 0;
+            this.arrived = true;            // 从这里开始走巡游分支，不再回爬升
             this.arriveT = this.t;          // 到位时刻，巡游相位从这里归零
             this.x = this.centerX;          // 此时已经收敛，赋值只是消除浮点误差
           }
@@ -3238,19 +3254,26 @@ class Enemy {
       }
       return;
     }
-    // 归位：300px/s 爬回去，比俯冲慢一截，留出"它要回来了"的反应时间
-    this.y -= 300 * dt;
+    // 归位：380px/s 爬回去，仍明显慢于俯冲（720），留出"它要回来了"的反应时间。
+    // 3.98 从 300 提到 380：300 时从屏幕下半爬回 y=216 要近两秒，
+    // 加上归位等待，一轮俯冲之后有三秒多它既不构成威胁、也打不着你——
+    // 那段时间玩家可以完全无视它，"更积极"就必须先把这段空窗压掉。
+    this.y -= 380 * dt;
     this.x += (this.centerX - this.x) * Math.min(1, 4.0 * dt);
     if (this.y <= 216) {
       this.y = 216;
       this.x = this.centerX;
       this.ramState = 0;
+      this.arrived = true;               // 俯冲归位后同样直接进巡游
       this.arriveT = this.t;             // 巡游相位归零，正好接回中心
-      /* 3.96：2.2 → 1.1，跟着 fireCd 一起减半。冲角型的实际开火周期不是 fireCd
-       * 一个数决定的——它是"俯冲 0.7 + 冲刺 1.3 + 爬回 ~1.5 + 这段等待"，
-       * 只把 ENEMY_DEFS.mbRam.fire 减半的话，它仍然要等 2.2 秒才扑下一次，
-       * 玩家体感是"别的都变快了，就它没变"。 */
-      this.fireT = 1.1;
+      /* 3.96：2.2 → 1.1，跟着 fireCd 一起减半。3.98 再 → 0.55。
+       * 冲角型的实际开火周期不是 fireCd 一个数决定的——它是
+       * "俯冲 0.7 + 冲刺 1.3 + 爬回 ~1.5 + 这段等待"，只把
+       * `ENEMY_DEFS.mbRam.fire` 减半的话，它仍然要等 2.2 秒才扑下一次，
+       * 玩家体感是"别的都变快了，就它没变"。
+       * 现在整轮约 4.1 秒（原来 5.1）：锁定 0.7 + 冲刺 1.3 + 爬回 1.5 + 等待 0.55。
+       * 锁定那 0.7 秒**不能再砍**——那是玩家读红线的全部窗口。 */
+      this.fireT = 0.55;
     }
   }
 
@@ -3826,10 +3849,29 @@ class Boss {
     this.centerCfg = !!tr.center;
     this.centerCd = 15;
     this.centerDur = 0;
+    /* 中央模式的四段时间轴（3.103）：进场 → 开火 → **停火等待** → 回位。
+     * 原来只有"进场 0.6 / 驻留 / 回位 0.6"三段——弹幕一停、本体立刻开始往回爬，
+     * 而且 0.6 秒爬 148px（≈250px/s），读起来像被弹回去了；玩家还没反应过来
+     * "打完了"，它已经归位了。现在把开火与回位拆开：中间留 `centerHold`
+     * 停火悬停（弹幕散干净、给玩家一个喘息的节拍），回位给到 `centerOut`。
+     * boss8 保持原节奏（fire 4.2 / hold 0 / out 0.6），boss4 用自己那套。 */
+    this.centerIn = 0.6;
+    this.centerFireDur = 4.2;
+    this.centerHold = 0;
+    this.centerOut = 0.6;
     this.centerAng = 0;
     this.centerFireT = 0;
+    this.centerKind = 'spiral';   // 'spiral'（boss8 四向螺旋）/ 'ray'（boss4 六臂旋转弹幕）
+    this.centerShot = 0;
     this.centerFromX = VIEW.w / 2;
     this.centerFromY = 232;
+
+    /* 核心过载（3.101，boss4）：浮游炮全灭 + 旋转射线阶段 → 压到屏幕中央扫场。
+     * 和 boss8 的 `center` 共用同一段移动/驻留代码，只是弹幕形态不同
+     * （`centerKind`）；不另开一个 mode，否则"进场 0.6s → 驻留 → 归位 0.6s"
+     * 这套曲线要抄第二份。 */
+    this.coreCfg = tr.core || null;
+    this.coreCd = this.coreCfg ? 1.2 : 0;
 
     // 分裂
     this.splitAt = tr.splitAt || 0;
@@ -4184,12 +4226,48 @@ class Boss {
       this.centerCd -= dt;
       if (this.centerCd <= 0 && p.alive) {
         this.centerCd = 23;
+        this.centerKind = 'spiral';
         this.mode = 'center';
-        this.centerDur = 5.4;
-        this.modeT = 5.4;
+        this.centerFireDur = 4.2;
+        this.centerHold = 0;
+        this.centerOut = 0.6;
+        this.centerDur = this.centerIn + this.centerFireDur + this.centerHold + this.centerOut;
+        this.modeT = this.centerDur;
         this.centerFromX = this.x;
         this.centerFromY = this.y;
         this.centerFireT = 0.35;
+        game.onBossCenter(this);
+      }
+    }
+
+    /* 核心过载（3.101，boss4）：炮塔全拆 + 旋转射线阶段 → 压到屏幕中央扫场。
+     * 三个条件缺一不可：
+     *   · `drones.length && 全灭`：这是"拆炮塔"的奖励，没拆就永远不出现；
+     *   · `phase === 1`：只在"旋转射线"这一段，二阶段的环形+瞄准本来就在
+     *     逼玩家横移，再叠一次中央驻留会变成两张考卷同时发；
+     *   · `mode === 'idle'`：不和分裂/召唤/俯冲抢同一个 mode。
+     * 冷却一直在跑（不限条件），所以"最后一炮塔炸掉"之后 1~2 秒内就会触发，
+     * 玩家能立刻把"我拆干净了"和"它开始发狂"连起来读。 */
+    if (this.coreCfg && this.drones.length && this.mode === 'idle') {
+      this.coreCd -= dt;
+      if (this.coreCd <= 0 && this.phase === 1 && p.alive &&
+          this.drones.every(d => !d.alive)) {
+        this.coreCd = this.coreCfg.cd;
+        this.centerKind = 'ray';
+        this.mode = 'center';
+        /* boss4 的时间轴（3.103）：4.8 秒开火 + 0.9 秒停火悬停 + **1.6 秒**回位。
+         * 停火段是这一版加的重点：弹幕一停就立刻往回爬，玩家会读成"它就是抖了一下"，
+         * 而且密集弹幕还在屏上飞、本体已经开始动，画面很乱。回位从 0.6 拉到 1.6 秒
+         * （148px → 约 93px/s），是"从容退回阵地"的读感，不再像被弹回去。 */
+        this.centerFireDur = this.coreCfg.dur;
+        this.centerHold = this.coreCfg.hold || 0;
+        this.centerOut = this.coreCfg.out || 0.6;
+        this.centerDur = this.centerIn + this.centerFireDur + this.centerHold + this.centerOut;
+        this.modeT = this.centerDur;
+        this.centerFromX = this.x;
+        this.centerFromY = this.y;
+        this.centerFireT = 0.35;
+        this.centerAng = Math.atan2(p.y - this.y, p.x - this.x);
         game.onBossCenter(this);
       }
     }
@@ -4331,38 +4409,89 @@ class Boss {
     if (this.mode === 'center') {
       this.modeT -= dt;
       const el = this.centerDur - this.modeT;
-      if (el < 0.6) {
-        // 0.6 秒移到中央
-        const k = easeOut(el / 0.6);
+      const fireEnd = this.centerIn + this.centerFireDur;
+      const holdEnd = fireEnd + this.centerHold;
+      if (el < this.centerIn) {
+        // 进场：压到屏幕中央
+        const k = easeOut(el / this.centerIn);
         this.x = this.centerFromX + (VIEW.w / 2 - this.centerFromX) * k;
         this.y = this.centerFromY + (380 - this.centerFromY) * k;
-      } else if (this.modeT > 0.6) {
-        // 4.2 秒驻留：四向螺旋，每 0.12s 转 0.30 rad
+      } else if (el < fireEnd) {
         this.x = VIEW.w / 2;
         this.y = 380;
         this.centerFireT -= dt;
         if (this.centerFireT <= 0) {
-          this.centerFireT = 0.12;
-          this.centerAng += 0.30;
-          this.centerShot = (this.centerShot || 0) + 1;
-          for (let i = 0; i < 4; i++) {
-            const a = this.centerAng + i * Math.PI / 2;
-            game.spawnEnemyBullet(this.x, this.y, Math.cos(a) * 212, Math.sin(a) * 212,
-              { kind: 'enemyAlt' });
-          }
-          // 每 4 轮补一组瞄准弹：否则玩家只要蹲在正下方就安全
-          if (this.centerShot % 4 === 0 && p.alive) {
-            const aim = Math.atan2(p.y - this.y, p.x - this.x);
-            for (const off of [-0.10, 0.10]) {
-              game.spawnEnemyBullet(this.x, this.y,
-                Math.cos(aim + off) * 305, Math.sin(aim + off) * 305,
-                { kind: 'big', r: 10 });
+          if (this.centerKind === 'ray') {
+            /* boss4 核心过载（3.101）：六臂旋转弹幕。
+             * 与二阶段的"双向旋转射线"是同一颗弹（enemyAlt、300 速），
+             * 但从屏幕正中向四周铺开。
+             *
+             * 每条臂单发、但一共 **6 条**（60° 一条），射速 0.08 秒：
+             * 单发细线扫过一个站着不动的玩家只要 0.03 秒，命中率不到三成——
+             * 实测 4 臂时站桩 4 秒只吃一发，那这套机制就白做了
+             * （玩家不需要绕，只要运气好）。改 6 臂之后，
+             * 玩家所在的方位每 0.87 秒就被扫一次（4 臂是 1.3 秒），
+             * 站桩变成 3.6 秒吃两发（52 血，约七成血条），绕进缝里才是 0 伤。
+             *
+             * 6 臂 / 0.08 秒 = 75 发/秒，臂间距 24px（300 速 × 0.08），
+             * 读起来是一圈连续的螺旋而不是几根虚线。
+             * 缝 60°、转速 1.25 rad/s：贴着 170px 绕需要 212px/s，
+             * 仍在玩家 330 的余量内；半径超过 ~264px 就跟不上缝了，
+             * 所以它天然把人往里逼。斜插过臂也成立（24px 间距、
+             * 判定只有几像素），是"逼你动"而不是"必吃伤害"。 */
+            this.centerFireT = 0.08;
+            this.centerAng += 0.10;
+            this.centerShot = (this.centerShot || 0) + 1;
+            for (let i = 0; i < 6; i++) {
+              const a = this.centerAng + i * Math.PI / 3;
+              game.spawnEnemyBullet(this.x, this.y, Math.cos(a) * 300, Math.sin(a) * 300,
+                { kind: 'enemyAlt' });
+            }
+            /* 每 10 轮（0.8 秒）补一组瞄准弹：旋转臂本身对"站着不动"的惩罚
+             * 不够——实测站桩 3.6 秒只吃一发（臂扫过身体只有 0.03 秒的窗口，
+             * 命中靠运气）。瞄准弹读的是玩家当前位置，**中间那发必须正中**：
+             * 只发 `±0.10` 一对的话，站在瞄准点上的玩家正好落在两发中间
+             * （320px 距离上各偏 32px），等于专门放过站桩的人。
+             * 现在 3 发一组（中 + 两侧），站着必挨、横移一步就甩开。 */
+            if (this.centerShot % 10 === 0 && p.alive) {
+              const aim = Math.atan2(p.y - this.y, p.x - this.x);
+              for (const off of [-0.10, 0, 0.10]) {
+                game.spawnEnemyBullet(this.x, this.y,
+                  Math.cos(aim + off) * 300, Math.sin(aim + off) * 300,
+                  { kind: 'enemyAlt' });
+              }
+            }
+          } else {
+            // 4.2 秒驻留：四向螺旋，每 0.12s 转 0.30 rad
+            this.centerFireT = 0.12;
+            this.centerAng += 0.30;
+            this.centerShot = (this.centerShot || 0) + 1;
+            for (let i = 0; i < 4; i++) {
+              const a = this.centerAng + i * Math.PI / 2;
+              game.spawnEnemyBullet(this.x, this.y, Math.cos(a) * 212, Math.sin(a) * 212,
+                { kind: 'enemyAlt' });
+            }
+            // 每 4 轮补一组瞄准弹：否则玩家只要蹲在正下方就安全
+            if (this.centerShot % 4 === 0 && p.alive) {
+              const aim = Math.atan2(p.y - this.y, p.x - this.x);
+              for (const off of [-0.10, 0.10]) {
+                game.spawnEnemyBullet(this.x, this.y,
+                  Math.cos(aim + off) * 305, Math.sin(aim + off) * 305,
+                  { kind: 'big', r: 10 });
+              }
             }
           }
         }
+      } else if (el < holdEnd) {
+        /* 停火悬停（3.103）：弹幕已停，本体在中央静止 `centerHold` 秒。
+         * 这一段不发弹，让上一轮的弹幕飞出去、给玩家一个"打完了"的节拍，
+         * 然后才开始回位——回位和收火挤在一起会读成"它抖了一下"。 */
+        this.x = VIEW.w / 2;
+        this.y = 380;
       } else {
-        // 最后 0.6 秒回到巡游高度，x 留在中央（swayT 归零后正好对齐）
-        const k = easeOut(1 - Math.max(0, this.modeT) / 0.6);
+        // 回位：`centerOut` 秒退回巡游高度，x 留在中央（swayT 归零后正好对齐）
+        const outT = Math.max(0.001, this.centerOut);
+        const k = easeOut(Math.min(1, Math.max(0, 1 - this.modeT / outT)));
         this.x = VIEW.w / 2;
         this.y = 380 + (232 - 380) * k;
       }

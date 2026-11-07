@@ -3144,7 +3144,15 @@ class Game {
    *  如果被"从底部升起"的豁免吃掉，它就永远撞不到人。 */
   _canRam(e) {
     if (e.entryImmune || e.spawnGuard > 0) return false;
-    if (e.def.mb === 'ram' && e.ramState === 2) return true;
+    /* 冲角型（`mb:'ram'`）**全程**放行，不只俯冲那一段（3.100）。
+     * 3.96 只放行了 `ramState === 2`（俯冲中），其余状态落到下面那条
+     * "从底部升起、还在 y > 320"的豁免里。而它俯冲穿过玩家之后正是
+     * 在下半屏往上爬回（`ramState 3`，y 500 → 216），玩家顺手一撞就整只穿过去、
+     * 双方都不掉血——它是唯一会把战场拉到屏幕下半区的小 BOSS，
+     * 拿"从底部冒出来还没进场"的尺子量它，等于让它在最容易被撞的时候变成空气。
+     * 出场那一段由 `spawnGuard`（`SPAWN_GUARD.mbRam` 1.3 秒）单独管，
+     * 不需要这条豁免兜底。 */
+    if (e.def.mb === 'ram') return true;
     if (e.fromBottom && e.y > 320) return false;
     return true;
   }
@@ -3517,6 +3525,9 @@ class Game {
     // 护盾：机头前方的半椭圆挡板，只吃子弹不吃撞机。
     // 放在"敌方子弹 → 玩家"之前、环绕机之后：护盾是最外层的一道，
     // 同一颗弹被环绕机挡掉就不该再扣护盾耐久。
+    /* 无敌期护盾照常挡弹（3.103 改回）：盾是机头前方的一块实体挡板，
+     * 它挡的是"弹"不是"伤害"——无敌只是不扣血，不该让弹从盾面上穿过去。
+     * 撞机那条已经单独跳过，所以无敌期盾不会掉耐久的是撞机，不是子弹。 */
     if (p.shield) {
       for (const b of this.bullets) {
         if (!b.active || b.friendly) continue;
@@ -3549,6 +3560,12 @@ class Game {
     // 敌方子弹 → 玩家
     for (const b of this.bullets) {
       if (!b.active || b.friendly) continue;
+      /* 无敌期**照样挡子弹**（3.103 按玩家要求改回）：弹打上来就消失，
+       * 只是 `Player.hit()` 里 `invuln > 0` 会直接 return、不扣血。
+       * 挡弹是这套游戏"机身也是一个实体"的基本读感——子弹从无敌的机身上
+       * 穿过去，看起来像判定坏了；而且重生那 2.6 秒本来就该帮玩家把
+       * 出生点周围的弹清掉一条缝，而不是留一群弹贴在身后。
+       * 无敌期唯一不做的是**撞机**（见下面那段），因为那是双方各结算一次的事件。 */
       if (dist2(b.x, b.y, p.x, p.y) < (PLAYER.hitR + b.r) * (PLAYER.hitR + b.r)) {
         b.active = false;
         if (this.god) continue;
@@ -3567,27 +3584,42 @@ class Game {
       if (!e.active || !this._canRam(e)) continue;
       const ramming = e.def.mb === 'ram' && e.ramState === 2;
       if (dist2(p.x, p.y, e.x, e.y) < (PLAYER.hitR + e.r * 0.8) * (PLAYER.hitR + e.r * 0.8)) {
-        /* 撞机 = 双方都掉血（3.32）。以前敌机吃 999 直接爆，
-         * 现在按"自身最大血量 × ramEnemyDmg"结算：小机当场碎，重装机剩三成，
-         * 小 BOSS 只掉一块——而不是被撞一下就凭空消失。
-         * 冲角型（俯冲中）不因撞机自毁：它是唯一主动撞上来的单位，
-         * 撞到就死会让"被撞一下顺手换掉一个小 BOSS"变成最优解。
-         * 整条蛇（头 + 关节）都不吃撞机伤害，当墙处理（否则一条命换一节的分）。 */
-        if (!ramming && e.ai !== 'snake') {
-          e.hit(Math.max(30, e.maxHp * PLAYER.ramEnemyDmg), null, this, { ignoreShield: true });
-        }
+        /* 无敌期**不做撞机判断**（3.102 起，3.103 明确成"只这一条"）：
+         * 玩家不掉血、敌机也不掉血、护盾耐久也不扣。判断必须排在
+         * `p.shield` 之前：否则无敌期贴着敌机飞时盾会被一帧帧"撞"掉耐久
+         * 甚至碎掉，而本体一点血不掉，读起来像护盾在乱扣。
+         * 注意这不代表"无敌期没有碰撞"——子弹仍然会被机身和盾挡下来，
+         * 只是撞机这种"双方各结算一次"的事件整段跳过。 */
+        if (this.god || p.invuln > 0) continue;
         /* 3.96：有盾时先让盾吃这一撞——扣耐久、敌机照样掉血、本体不掉。
          * 排在 `p.hit` 之前，是因为盾挡住就不该再结算伤害；
          * 也不能只把 `ramDmg` 改小：那样玩家仍会掉血、仍会掉武器等级，
-         * "罩住机头的盾"在手感上还是漏了一块。 */
-        if (this.god) continue;
-        /* 有盾就一律由盾承担，不走 `p.hit`：
+         * "罩住机头的盾"在手感上还是漏了一块。
+         *
+         * 有盾就一律由盾承担，不走 `p.hit`：
          * `_shieldRam` 自己会用 `ramT` 限流，所以冷却期内的第二帧什么也不做——
          * 写成"返回 true 才 continue"的话，冷却那 0.6 秒会漏回旧的掉血分支，
          * 表现是"盾还在、人却在掉血"，比完全不挡更让人困惑。 */
         if (p.shield) {
-          this._shieldRam(p, e, Math.max(30, e.maxHp * PLAYER.ramEnemyDmg), !ramming);
+          this._shieldRam(p, e, PLAYER.ramEnemyHit, !ramming);
           continue;
+        }
+        /* 3.100：撞机是"双方各结算一次"的一次性事件，两边的闸门必须共用。
+         * 玩家这边本来就有 `invuln` 兜底，敌机那边没有——原来 `e.hit` 写在
+         * `p.hit` 之前，玩家撞完进入 1.6 秒无敌后继续贴着它时，`p.hit` 被无敌
+         * 挡掉、`e.hit` 却每帧照样结算（小 BOSS 一帧 `maxHp × 0.7`，两帧就没了），
+         * 表现是"贴着撞一下，它自己碎掉、我一点血不掉"。无敌期本来就不该有
+         * 碰撞伤害，所以整段跳过，而不是只跳过玩家那一半。
+         * 3.102 起这个闸门挪到了最上面（连护盾一起跳）。 */
+        /* 撞机 = 双方都掉血（3.32）。以前敌机吃 999 直接爆，
+         * 现在吃固定 `PLAYER.ramEnemyHit`（3.102，60）：小杂兵一下碎，
+         * bomber 掉 29%、heavy 13%、小 BOSS 只有 5~15%——撞机是失误，
+         * 不该是"用一条命换掉一个小 BOSS"的清场手段。
+         * 冲角型（俯冲中）不因撞机自毁：它是唯一主动撞上来的单位，
+         * 撞到就死会让"被撞一下顺手换掉一个小 BOSS"变成最优解。
+         * 整条蛇（头 + 关节）都不吃撞机伤害，当墙处理（否则一条命换一节的分）。 */
+        if (!ramming && e.ai !== 'snake') {
+          e.hit(PLAYER.ramEnemyHit, null, this, { ignoreShield: true });
         }
         p.hit(this, PLAYER.ramDmg);
         if (!p.alive) return;
@@ -3635,7 +3667,9 @@ class Game {
 
     // BOSS 撞机：用 BOSS_HULL 的多圆轮廓，比单个矩形贴合实体形状
     if (this.bossActive && !this.boss.dead) {
-      if (this._bossHits(this.boss, p.x, p.y, PLAYER.hitR) && !this.god) {
+      /* 无敌期同样不碰：`p.hit` 里本来就会 return，但这里显式写出来，
+       * 以后谁在这条路上加"撞上就弹火花/震屏"，不会在无敌期凭空触发。 */
+      if (!this.god && p.invuln <= 0 && this._bossHits(this.boss, p.x, p.y, PLAYER.hitR)) {
         p.hit(this, PLAYER.ramDmg);
       }
       /* 队友撞 BOSS 本体：只队友掉血，BOSS 不掉——和玩家同一条规则
