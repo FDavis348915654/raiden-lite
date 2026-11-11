@@ -691,7 +691,8 @@ class Player {
       if (this.slotT[s2] <= 0 && this.canFire) {
         this.fireSlot(game, s2);
         // 射速由武器决定；全弹发射后一段时间内射速提升（见 OVERDRIVE.boostMul）
-        this.slotT[s2] = WEAPONS[this.weapons[s2]].cd * (this.boostT > 0 ? OVERDRIVE.boostMul : 1);
+        this.slotT[s2] = WEAPONS[this.weapons[s2]].cd * FIRE_RATE_MUL
+          * (this.boostT > 0 ? OVERDRIVE.boostMul : 1);
       }
     }
 
@@ -771,7 +772,7 @@ class Player {
          * 队友的下限是 L2，若继续漏着，它的僚机反而比主武器弱一整档。 */
         const pow = Math.min(s2 === 0 ? 2 : 1, this.lv[s2] || PLAYER.startPower);
         this.fireFrom(game, o.x, o.y - 18, mul, pow, wi);
-        o.slotT[s2] = WEAPONS[wi].cd * (s2 === 0 ? 1.45 : 1.9);
+        o.slotT[s2] = WEAPONS[wi].cd * FIRE_RATE_MUL * (s2 === 0 ? 1.45 : 1.9);
       }
     }
     game._shotMul = prevMul;
@@ -970,7 +971,7 @@ class Player {
     this.fireFrom(game, ta.x, ta.y - 18, C.mul * (this.tempMul || 1),
       Math.min(C.powMax, this.lv[0] || PLAYER.startPower), wi);
     game._shotMul = prevMul;
-    ta.slotT = WEAPONS[wi].cd * 1.15;
+    ta.slotT = WEAPONS[wi].cd * FIRE_RATE_MUL * 1.15;
   }
 
   fire(game) {
@@ -1029,7 +1030,12 @@ class Player {
     const wi = wIdx === undefined ? 0 : wIdx;
     const p = Math.min(PLAYER.maxPower, pow || this.lv[0] || PLAYER.startPower);
     const self = mul === undefined ? 1 : mul;
-    game._shotMul = self;
+    /* 3.104：主武器降频时单发同步加权 —— 两者共用 `FIRE_RATE_MUL`，
+     * 一处的改动就是一对（只改 cd 会砍掉整局火力，只改伤害则弹量没少）。
+     * 只在"玩家自己"这一层加：队友走 `Ally._fire`（`this.isPlayer` 为假），
+     * 它自己乘一次，免得被 `Player.prototype.fireFrom.call` 顺带放两次。
+     * 僚机 / 临时僚机都是 `this.fireFrom(...)`，`this` 是玩家，自动跟上。 */
+    game._shotMul = self * (this.isPlayer ? FIRE_RATE_MUL : 1);
 
     switch (WEAPONS[wi].id) {
       /* 火神炮：一轮多颗，但**错峰**出膛。
@@ -2024,13 +2030,15 @@ class Ally {
       this.slotT[i] -= dt;
       if (this.slotT[i] > 0) continue;
       const wi = this.weapons[i];
-      this.slotT[i] = WEAPONS[wi].cd * ALLY.cdMul;
+      this.slotT[i] = WEAPONS[wi].cd * ALLY.cdMul * FIRE_RATE_MUL;
       /* `_shotMul` 必须在调用前后存 / 取：fireFrom 会把它设成队友的倍率且不还原，
        * 之后玩家那些**不经过 fireFrom** 的子弹（三把临时武器）就会吃到 0.6 折扣。
        * 队列入队时已经把倍率捕获进 `s.mul`，所以这里恢复外层值不影响到队友自己。 */
       const prev = game._shotMul;
+      /* 单发同样吃 `FIRE_RATE_MUL`（3.104）：队友的 cd 也一起放慢了，
+       * 不补这一下就是"队友被单方面削弱 26%"——它和玩家是同一种枪。 */
       Player.prototype.fireFrom.call(this, game, this.x, this.y - 18,
-        ALLY.dmgMul, this.lv[i], wi, true);
+        ALLY.dmgMul * FIRE_RATE_MUL, this.lv[i], wi, true);
       game._shotMul = prev;
     }
     this._flushShots(dt, game);

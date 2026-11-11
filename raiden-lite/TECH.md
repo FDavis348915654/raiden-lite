@@ -300,6 +300,16 @@ draw 按 `shakeT / shakeDur` 衰减。
 后者用 `Ally.prototype._queueShot = Player.prototype._queueShot` 直接指过去，
 以后改错峰节奏（火神炮的 0.042s）队友自动跟上。
 
+**全局"降频"开关是 `FIRE_RATE_MUL`（3.104），一个常量管两头**：开火间隔乘它、
+单发伤害也乘它。四处 cd 必须同时乘——玩家槽位（`Player.update`）、正式僚机（`_updateOptions`）、
+临时僚机（`_updateTempAlly`）、队友（`Ally._fire`）。漏一处就出现"某条火力线比主机快 40%"，
+而画面里只是"那两架僚机怎么打得比你勤"，几乎不会被当成 bug 报上来。
+伤害那侧只加在 `fireFrom` 里一句 `game._shotMul = self * (this.isPlayer ? FIRE_RATE_MUL : 1)`：
+僚机 / 临时僚机都是 `this.fireFrom(...)`（`this` 是玩家）自动跟上；队友 `isPlayer === false`，
+在 `Ally._fire` 里自己乘一次——**绝不能两处都乘**，那就是 1.4²。
+两个例外是刻意留的：三把临时武器（`TEMP.*`）直接调 `spawnPlayerBullet`、不经过 `fireFrom`；
+全弹发射（`OVERDRIVE`）把 `_shotMul` 置 1 后直接出弹——它们都不是"主武器常规射击"。
+
 **`game._shotMul` 必须在调用前后存 / 取。** `fireFrom` 会把它设成队友的倍率（0.6）且**不还原**，
 而玩家有三把临时武器是**直接调 `spawnPlayerBullet`**、不经过 `fireFrom` 的——
 它们会静默吃到这个折扣。这类"全局临时变量不还原"的坑不报错，只让某个机制悄悄变弱。
