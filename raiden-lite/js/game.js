@@ -957,9 +957,27 @@ class Game {
     }
   }
 
+  /** BOSS 碎裂那一瞬间：给玩家无敌 + 把场上残余敌机一起炸掉（3.105）
+   *
+   *  ① 无敌**必须在这里给**，不能只在 `onBossKilled` 里给：
+   *  血量归零到 `onBossKilled` 之间还有 `deathT` 1.8 秒的碎裂演出，
+   *  这 1.8 秒里 `state` 仍是 `'boss'`、`_collide` 照跑，
+   *  满屏的残余弹幕照样能把人打死——"打赢了却被打死"最伤的地方就在这里，
+   *  因为玩家已经在看爆炸、手都松开了。`clear` 那一侧的 6 秒无敌（见
+   *  `onBossKilled`）只是接着兜住后面，管不到这一段。
+   *
+   *  ② 残余敌机一起爆掉：它们本来就是"这一关的尾巴"，BOSS 一死关卡就结束了，
+   *  让它们继续飞只是在结算画面前挡视线、顺便再撞玩家一下。
+   *  **不复用 `onEnemyKilled`**：那条路径里有 `_fireSupplyEvent('miniboss')`
+   *  和掉落表，一次清掉十来架就是全关最大的一场道具雨（还带分数与死亡散射），
+   *  BOSS 击破的奖励应当只有那两瓶 P（+ 残血那瓶 H）。
+   *  所以这里只做两件事：`active = false` + 爆炸粒子，模拟上是"被 BOSS 的爆炸吞掉"。
+   */
   onBossDying(b) {
     b.jitter(26);
     // 注意：这里不能清 bossActive，否则 Boss.update 不再执行，死亡倒计时永远走不完
+    this.player.invuln = Math.max(this.player.invuln, 2.6);
+    this._bossSweep();
     SFX.explode(true);
     for (let i = 0; i < 10; i++) {
       const t = i * 0.16;
@@ -980,6 +998,9 @@ class Game {
     this.clearT = 5.5;
     this.player.invuln = Math.max(this.player.invuln, this.clearT + 0.5);
     this.player.canFire = false;          // 没有敌人了，停火让结算画面干净
+    /* 碎裂那 1.8 秒里如果又冒出单位（BOSS 的分裂/召唤分支），这里补一刀——
+     * 结算画面里不该还有敌机在飞。已经清空时返回 0，不会重复爆。 */
+    this._bossSweep();
     SFX.stageClear();
     // 掉落奖励：P 从 3 瓶降到 2 瓶。4 瓶就能把四把枪顶到满级，
     // 每关结尾再白送 3 瓶的话，击杀掉落压得再低也没有意义。
@@ -987,6 +1008,39 @@ class Game {
     /* 残血才补一瓶 H（3.33：H 是回血，所以判据从"命少"改成"血少"）。
      * 用命数当判据的话，血量制下"还剩 3 条命但只剩 10 血"的玩家会被当成不需要补给。 */
     if (this.player.hp < this.player.maxHp * 0.6) this.spawnPickup(b.x, b.y + 30, 'H');
+  }
+
+  /** 把场上残余敌机（含整条蛇）一次性清掉，只留爆炸粒子。语义见 `onBossDying` ②。
+   *  返回清掉的架数：`onBossKilled` 里再调一次时，若已经清空就是 0，不会重复爆。 */
+  _bossSweep() {
+    /* 蛇要先收控制器：只把节 `active = false` 的话，`this.snakes` 里还留着
+     * 一条空蛇，下一关的双蛇会按索引取到它（第 9 关就是两条并行）。
+     * 直接 `length = 0` 是安全的——`_drawOneSnake` 见 head 不活就早退，
+     * 而蛇的所有状态都挂在这个数组上。 */
+    for (const s of this.snakes) {
+      for (const e of s.segs) {
+        if (!e.active) continue;
+        e.active = false;
+        this.explode(e.x, e.y, 0.8, '#c9a6ff', 10);
+      }
+      if (s.head && s.head.active) {
+        s.head.active = false;
+        this.explode(s.head.x, s.head.y, 1.6, '#e6d6ff', 22);
+      }
+    }
+    this.snakes.length = 0;
+
+    let n = 0;
+    for (const e of this.enemies) {
+      if (!e.active) continue;
+      e.active = false;
+      const big = e.maxHp >= 35 || e.elite;
+      this.explode(e.x, e.y, big ? 1.1 : 0.6,
+        e.elite ? '#ffd166' : this.level.accent, big ? 14 : 8);
+      n++;
+    }
+    if (n) SFX.explode(false);
+    return n;
   }
 
   /** 普通保险：向前投出一枚高爆弹。

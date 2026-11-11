@@ -310,6 +310,14 @@ draw 按 `shakeT / shakeDur` 衰减。
 两个例外是刻意留的：三把临时武器（`TEMP.*`）直接调 `spawnPlayerBullet`、不经过 `fireFrom`；
 全弹发射（`OVERDRIVE`）把 `_shotMul` 置 1 后直接出弹——它们都不是"主武器常规射击"。
 
+**BOSS 死亡是"两段"：`onBossDying`（血量归零那一帧）与 `onBossKilled`（`deathT` 1.8 秒后）**（3.105）。
+中间这 1.8 秒 `state` 仍是 `'boss'`、`_collide` 照跑，只有 `onBossKilled` 才切 `'clear'` ——
+所以"给玩家无敌"和"清场"都必须落在**前一段**：无敌在 `onBossDying` 里 `Math.max(invuln, 2.6)`，
+残余敌机走 `_bossSweep()`（`active = false` + 爆炸粒子，蛇连 `this.snakes` 控制器一起收）。
+`_bossSweep` **不能复用 `onEnemyKilled`**：那条路径里有 `_fireSupplyEvent('miniboss')`、
+掉落表、死亡散射与分数，一次清十来架就是全关最大的一场道具雨。
+也不该借 `_bombing` 当开关：那个标志还被 `_bombBoom` 读，留在错的值上会静默关掉保险的掉落。
+
 **`game._shotMul` 必须在调用前后存 / 取。** `fireFrom` 会把它设成队友的倍率（0.6）且**不还原**，
 而玩家有三把临时武器是**直接调 `spawnPlayerBullet`**、不经过 `fireFrom` 的——
 它们会静默吃到这个折扣。这类"全局临时变量不还原"的坑不报错，只让某个机制悄悄变弱。

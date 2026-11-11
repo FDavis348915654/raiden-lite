@@ -84,6 +84,13 @@ title → intro → play → warn → boss → clear → (下一关 intro | win)
 > 一次是 `warn` 和 `clear` 漏了 `_updatePickups` / `_collectPickups`（道具吃不到）。
 > 现在拾取逻辑被抽成独立的 `_collectPickups()`，与战斗碰撞解耦，四类状态都显式调用。
 
+> **BOSS 血量归零 ≠ 结算开始**（3.105）：`Boss.deathT` 那 1.8 秒碎裂演出里 `state` 仍是 `boss`、
+> `_collide` 照跑，所以"打赢了还被流弹打死"真的会发生——玩家这时候已经在看爆炸、手都松开了。
+> 现在 `onBossDying`（血量归零那一帧）就把 `player.invuln` 顶到 **2.6 秒**，
+> 同时 `_bossSweep()` 把场上残余敌机（含整条蛇）连爆炸一起清掉；
+> 到 `onBossKilled` 再由"`clearT` 5.5 + 0.5"接管。`onBossKilled` 里也补调一次 `_bossSweep`——
+> 碎裂期若还有分支放出了单位（BOSS 的召唤/分裂），结算画面里不该还有敌机在飞。
+
 ---
 
 ## 3. 玩家系统
@@ -1600,6 +1607,7 @@ BOSS      2200 / 2800 / 2400 / 4200 / 5600 / 6300 / 7500 / 8600 / 10400
 | 预警期道具不吃 | `warn` 分支漏了 `_updatePickups` | 补上 |
 | 换武器后彻底不开火 | 删了 `PLAYER.fireCd` 但 `update` 还在读 | 改读 `WEAPONS[weapon].cd` |
 | BOSS 打死后卡住不结算 | `onBossDying` 过早清 `bossActive`，`Boss.update` 不再执行 | 移到 `onBossKilled` |
+| 打赢 BOSS 后还被流弹打死 | 无敌只在 `onBossKilled` 给，而血量归零到那时隔着 `deathT` 1.8 秒，这段 `state` 仍是 `boss`、碰撞照跑 | 无敌与残余敌机清场移到 `onBossDying`（3.105） |
 | 敌机压在分数上 | HUD 底板画在背景层 | 底板移进 `_drawHud`（实体之后） |
 | 镜像机叠成一条竖线 | 全部镜像到同一个 x | 保留 35% 编队偏移 |
 | 放保险像卡住 | 震屏 34px + 白闪 0.62 | 降到 16px / 0.42 |
