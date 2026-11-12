@@ -49,6 +49,9 @@ class Game {
     /* 最高分：只存本机 localStorage。读不到的场合（隐私模式 / 禁用存储）
      * 就当 0 处理，绝不能让一个记录分数把整个游戏搞崩。 */
     this.hiScore = this._loadHiScore();
+    /* 通关标记：读不到就当没通关（隐私模式下每次都是"第一次"，
+     * 那行彩蛋不显示而已，不影响任何逻辑）。 */
+    this.cleared = this._loadCleared();
     this.hiSaveT = 0;                // 存档节流：破纪录时每秒最多写一次
     this.hiBeatT = 0;                // 破纪录高亮剩余时间
     this.nextLifeScore = SCORE_1UP.first;   // 下一次分数奖励的分数线（见 _updateScoreLife）
@@ -84,6 +87,14 @@ class Game {
     this.warnT = 0;
     this.clearT = 0;
     this.overT = 0;
+    /* 剧情文案（3.108）：三处投放共用一套计时器。
+     * 单独一条计时、不挂在 bannerT/warnT/clearT 上——那两个是状态机自己的
+     * 时钟，改它们会连带改变"多久后开打 / 多久后切关"，而文案只需要
+     * 自己淡出。这里只管显示，不参与任何逻辑判断。 */
+    this.storyT = 0;
+    this.storyDur = 0;
+    this.storyLines = null;
+    this.storyKind = '';
     this.bossActive = false;
     this.paused = false;
     this.flashT = 0;
@@ -726,11 +737,19 @@ class Game {
     this.player.x = VIEW.w / 2;
     this.state = 'intro';
     this.bannerT = 2.4;
+    /* 简报 3.8 秒（3.109：原 3.0）。比 intro（2.4 秒）长 1.4 秒——字号加大到
+     * 16px 之后一行变得更"重"，需要多给一点时间读完；同时不能再长，
+     * play 开始后它还压在 0.215H，停留超过两秒就会挡住第一波敌机。 */
+    this._showStory('brief', this._storyFor('brief'), 3.8);
   }
 
   startBossWarn() {
     this.state = 'warn';
     this.warnT = 2.2;
+    const taunt = this._storyFor('taunt');
+    /* 3.2 秒（3.109：原 2.2，正好等于 warn 时长）。多出的 1 秒落在 BOSS 入场
+     * 演出里——那 2.8 秒本来打不动它，正是读这句话的时候。 */
+    if (taunt) this._showStory('taunt', [taunt], 3.2);
     SFX.warn();
   }
 
@@ -996,6 +1015,10 @@ class Game {
     this.bossActive = false;
     this.state = 'clear';
     this.clearT = 5.5;
+    /* 击破词 4.2 秒（3.109：原 3.2）：clear 有 5.5 秒，放得下。
+     * 比 STAGE CLEAR 的跳字晚半秒收——先看结果、再读那句话。 */
+    const down = this._storyFor('down');
+    if (down) this._showStory('down', [down], 4.2);
     this.player.invuln = Math.max(this.player.invuln, this.clearT + 0.5);
     this.player.canFire = false;          // 没有敌人了，停火让结算画面干净
     /* 碎裂那 1.8 秒里如果又冒出单位（BOSS 的分裂/召唤分支），这里补一刀——
@@ -2118,6 +2141,7 @@ class Game {
     if (this.splitToastT > 0) this.splitToastT -= dt;
     if (this.rearmToastT > 0) this.rearmToastT -= dt;
     if (this.bigToastT > 0) this.bigToastT -= dt;
+    if (this.storyT > 0) this.storyT -= dt;
     if (this.contToastT > 0) this.contToastT -= dt;
     if (this.devToastT > 0) this.devToastT -= dt;
     for (let i = this.arcs.length - 1; i >= 0; i--) {
@@ -2190,6 +2214,7 @@ class Game {
           this.state = 'win';
           this.winT = 0;      // 刚进通关页：输入锁与提示渐显都从这里起算
           this._saveHiScore();   // 打完一整局，把纪录立刻落盘
+          this._markCleared();   // 标题页那行"已归档"从此常驻
         }
       }
       return;
@@ -4050,6 +4075,21 @@ class Game {
     } catch (e) { /* 写不进去就算了，本局内显示仍然正确 */ }
   }
 
+  _loadCleared() {
+    try {
+      return localStorage.getItem(CLEAR_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 通关当帧写一次。已经有标记就不再写——这个键一辈子只会被写一次。 */
+  _markCleared() {
+    if (this.cleared) return;
+    this.cleared = true;
+    try { localStorage.setItem(CLEAR_KEY, '1'); } catch (e) { /* 同上，忽略 */ }
+  }
+
   /** 破纪录就实时抬最高分。存档做节流：分数每帧都在涨，
    *  每帧写一次 localStorage 会拖慢主线程（序列化 + 同步 IO）。 */
   _updateHiScore(dt) {
@@ -5048,6 +5088,87 @@ class Game {
     ctx.textBaseline = 'alphabetic';
   }
 
+  /* ------------------------------------------------ 剧情文案（3.108） */
+
+  /** 投放一段剧情文字。`kind` 决定画在哪，`lines` 是已分行的正文（不带引号）。 */
+  _showStory(kind, lines, dur) {
+    if (!lines || !lines.length) return;
+    this.storyKind = kind;
+    this.storyLines = lines;
+    this.storyDur = dur;
+    this.storyT = dur;
+  }
+
+  /** 取本关文案。查不到就返回 null——以后加第 10 关时漏写剧情是"少一句话"，
+   *  而不是"读 undefined.brief 崩掉"。 */
+  _storyFor(kind) {
+    const s = STORY.levels[this.level.id];
+    return s ? s[kind] : null;
+  }
+
+  /** 按可用宽度截断。480 宽、16px 字一行大约 26 个汉字，超了就断在省略号上：
+   *  宁可少一句，也不要让文字压出屏幕（手环端比 480 更窄）。 */
+  _fitText(ctx, text, maxW) {
+    if (ctx.measureText(text).width <= maxW) return text;
+    let s = text;
+    while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+    return s + '…';
+  }
+
+  /* 三处文案的位置是分开写死的，不共用 y：它们各自要和已有元素错开——
+   * 简报躲开 0.40H 的关卡名，登场词躲开 0.44H 的 WARNING，
+   * 击破词躲开 0.42H 的 STAGE CLEAR。统一按 kind 分支比算偏移量好改。
+   *
+   * 3.109：字号整体抬一级（13/15 → 16/18）。原来 13px 在手机上只有指甲盖
+   * 那么大，玩家反馈"看不清"——剧情文字是这一段唯一的语气载体，
+   * 看不清就等于没写。字号变大后行距跟着放到 26，否则两行会黏成一坨。 */
+  _drawStory(ctx) {
+    if (this.storyT <= 0 || !this.storyLines) return;
+    const cx = VIEW.w / 2;
+    const maxW = VIEW.w - 56;
+    /* 淡入 0.3 秒、淡出 0.7 秒。淡出比淡入慢：它经常和爆炸、结算跳字同时出现，
+     * 快淡出会被那些东西盖住，玩家一句话没读完就没了。 */
+    const shown = this.storyDur - this.storyT;
+    const a = Math.min(1, shown / 0.3) * Math.min(1, this.storyT / 0.7);
+    if (a <= 0) return;
+
+    let y, font, color, lineH;
+    if (this.storyKind === 'brief') {
+      // 16px 两行：起点上移到 0.215H，给第二行留出行距，离关卡名还有 130px
+      y = VIEW.h * 0.215;
+      font = '16px "PingFang SC", sans-serif';
+      color = 'rgba(196,228,248,0.95)';
+      lineH = 26;
+    } else if (this.storyKind === 'taunt') {
+      y = VIEW.h * 0.44 + 80;
+      font = '18px "PingFang SC", sans-serif';
+      color = 'rgba(255,206,206,0.96)';
+      lineH = 24;
+    } else {
+      // 击破词：18px，和登场词同级；下移到 +84 避开 +36 的 BONUS 跳字
+      y = VIEW.h * 0.42 + 84;
+      font = '18px "PingFang SC", sans-serif';
+      color = this.level.accent;
+      lineH = 24;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.textAlign = 'center';
+    ctx.font = font;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.78)';
+    ctx.fillStyle = color;
+    this.storyLines.forEach((ln, i) => {
+      const s = '「' + this._fitText(ctx, ln, maxW) + '」';
+      const yy = y + i * lineH;
+      ctx.strokeText(s, cx, yy);
+      ctx.fillText(s, cx, yy);
+    });
+    ctx.restore();
+    ctx.textAlign = 'left';
+  }
+
   _drawOverlay(ctx) {
     const cx = VIEW.w / 2;
 
@@ -5154,6 +5275,24 @@ class Game {
       ctx.fillStyle = 'rgba(214,236,252,0.88)';
       ctx.font = '24px "PingFang SC", sans-serif';
       ctx.fillText('感谢你游玩本游戏', cx, VIEW.h * 0.62);
+
+      /* 尾声（3.108）：三行叙述 + 一行落款，节奏是"先出成绩、再出故事"。
+       * 比结算数字晚 1.2 秒淡入——否则 ALL CLEAR 和第一句话会同时撞上来，
+       * 玩家两个都读不进去。0.695H 起、行距 20，落款 0.795H，底部还剩 170px。 */
+      const ea = clamp((this.winT - 1.2) / 1.0, 0, 1);
+      if (ea > 0) {
+        ctx.globalAlpha = ea * 0.88;
+        ctx.fillStyle = 'rgba(204,228,247,0.92)';
+        ctx.font = '13px "PingFang SC", sans-serif';
+        for (let i = 0; i < STORY.ending.length; i++) {
+          ctx.fillText(this._fitText(ctx, STORY.ending[i], VIEW.w - 56), cx, VIEW.h * 0.695 + i * 22);
+        }
+        ctx.globalAlpha = ea;
+        ctx.fillStyle = '#ffd166';
+        ctx.font = '15px "PingFang SC", sans-serif';
+        ctx.fillText(STORY.endingMark, cx, VIEW.h * 0.795);
+        ctx.globalAlpha = 1;
+      }
       ctx.restore();
       ctx.textAlign = 'left';
     }
@@ -5346,6 +5485,9 @@ class Game {
       ctx.textAlign = 'left';
     }
 
+    // 剧情文案压在暂停遮罩下面：暂停时该看的是"怎么继续"，不是感慨
+    this._drawStory(ctx);
+
     if (this.paused) {
       ctx.save();
       ctx.fillStyle = 'rgba(4,7,12,0.65)';
@@ -5401,6 +5543,13 @@ class Game {
     ctx.fillStyle = 'rgba(120,210,255,0.85)';
     ctx.font = '600 14px ui-monospace, monospace';
     ctx.fillText('R A I D E N   L I T E', cx, VIEW.h * 0.405 + 28);
+
+    /* 剧情第一句（3.108）：整局开打前唯一一段文字，只在这里出现一次。
+     * 3.109 字号 11 → 12px：它和下面那句副标题字号太接近，11px 在手机上
+     * 会被当成"看不清的小字说明"，反而没人读。 */
+    ctx.fillStyle = 'rgba(160,208,232,0.76)';
+    ctx.font = '12px "PingFang SC", sans-serif';
+    ctx.fillText(STORY.tagline, cx, VIEW.h * 0.405 + 50);
 
     // 分隔线
     ctx.strokeStyle = 'rgba(110,200,255,0.32)';
@@ -5521,6 +5670,16 @@ class Game {
     ctx.fillStyle = 'rgba(150,190,220,0.85)';
     ctx.font = '12px ui-monospace, monospace';
     ctx.fillText(VERSION, 16, VIEW.h - 16);
+
+    /* 通关彩蛋（3.108）：打完一整局的玩家在右下角多看到一行归档标记。
+     * 只存一个布尔值，不新增存档系统——它的作用就是"我确实打完了"。 */
+    if (this.cleared) {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,225,150,0.5)';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.fillText(STORY.archive, VIEW.w - 16, VIEW.h - 18);
+      ctx.textAlign = 'left';
+    }
 
     ctx.restore();
     ctx.textAlign = 'left';
