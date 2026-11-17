@@ -25,6 +25,8 @@ const WIN_INPUT_LOCK = 2.0;
 const OVER_INPUT_LOCK = 1.4;
 // 玩家受击的红晕时长：要盖过 0.46 秒震屏，玩家才能把"泛红"和"被击中"对上号
 const HURT_DUR = 0.7;
+// 背景底图的平铺高度：素材是 512×512，按屏幕宽度等比缩放后高度仍是 512
+const BG_TILE_H = 512;
 
 const input = {
   left: false, right: false, up: false, down: false,
@@ -737,19 +739,29 @@ class Game {
     this.player.x = VIEW.w / 2;
     this.state = 'intro';
     this.bannerT = 2.4;
-    /* 简报 3.8 秒（3.109：原 3.0）。比 intro（2.4 秒）长 1.4 秒——字号加大到
-     * 16px 之后一行变得更"重"，需要多给一点时间读完；同时不能再长，
-     * play 开始后它还压在 0.215H，停留超过两秒就会挡住第一波敌机。 */
-    this._showStory('brief', this._storyFor('brief'), 3.8);
+    /* 简报 6.2 秒（3.111：原 3.8）。两行最长 24 个汉字，静读 4 秒，
+     * 但开局同时要躲第一波、还要瞄，实际阅读速度只有静读的一半左右。
+     * 3.8 秒玩家反馈"读不完"，这里直接给到 6.2：intro 2.4 秒全在文字上，
+     * 剩下 3.8 秒压在 play 开头——文字在 0.215H，不会盖住底部的机体和弹道。 */
+    this._showStory('brief', this._storyFor('brief'), 6.2);
+
+    /* 预烘本关要用的两张贴图（3.110）：背景两层 + BOSS 的投影。
+     * 放在 intro 里做，是因为这两秒画面基本是静的、玩家也还不能开火——
+     * 原来 BOSS 投影是在它第一次画出来的那一帧才烘，等于在"BOSS 登场"
+     * 这个最该顺的时刻塞进一次建画布 + 34px 模糊。 */
+    this._bgLayers();
+    if (Assets.ready) {
+      Assets.prewarmShadow(this.level.boss, this.cv.width / VIEW.w);
+    }
   }
 
   startBossWarn() {
     this.state = 'warn';
     this.warnT = 2.2;
     const taunt = this._storyFor('taunt');
-    /* 3.2 秒（3.109：原 2.2，正好等于 warn 时长）。多出的 1 秒落在 BOSS 入场
-     * 演出里——那 2.8 秒本来打不动它，正是读这句话的时候。 */
-    if (taunt) this._showStory('taunt', [taunt], 3.2);
+    /* 5.0 秒（3.111：原 3.2）。warn 2.2 秒 + BOSS 入场无敌 2.8 秒正好 5 秒——
+     * 这段本来打不动它，文字一直留到护罩消失的那一刻收，读完刚好开打。 */
+    if (taunt) this._showStory('taunt', [taunt], 5.0);
     SFX.warn();
   }
 
@@ -1014,11 +1026,12 @@ class Game {
     this.score += Math.round(SCORE.bossKill * (b.scoreMul || 1));
     this.bossActive = false;
     this.state = 'clear';
-    this.clearT = 5.5;
-    /* 击破词 4.2 秒（3.109：原 3.2）：clear 有 5.5 秒，放得下。
-     * 比 STAGE CLEAR 的跳字晚半秒收——先看结果、再读那句话。 */
+    this.clearT = 7.2;
+    /* 击破词 5.8 秒（3.111：原 4.2）：clear 同步从 5.5 放到 7.2，句子读完
+     * 之后还剩 1.4 秒的安静——上一版 4.2 秒收尾时句子刚淡出，读得慢的人
+     * 看到的是一片空屏，等于白写。 */
     const down = this._storyFor('down');
-    if (down) this._showStory('down', [down], 4.2);
+    if (down) this._showStory('down', [down], 5.8);
     this.player.invuln = Math.max(this.player.invuln, this.clearT + 0.5);
     this.player.canFire = false;          // 没有敌人了，停火让结算画面干净
     /* 碎裂那 1.8 秒里如果又冒出单位（BOSS 的分裂/召唤分支），这里补一刀——
@@ -3838,7 +3851,12 @@ class Game {
 
     if (this.shakeT > 0) {
       const a = this.shakeAmp * (this.shakeT / this.shakeDur);
-      ctx.translate(rand(-a, a), rand(-a, a));
+      /* 震屏偏移必须对齐到设备像素。背景是几张 1:1 的预烘贴图，
+       * 一旦整体 translate 到 3.7px 这种非整数，每张都退化成双线性采样：
+       * 实测整帧 4.2ms → 27.9ms，正好在"被打中/爆炸"这些最需要顺的时刻掉帧。
+       * 0.5 设备像素的量化看不出来，抖动幅度本身就有 ±14px。 */
+      const S = (this.cv.width / VIEW.w) || 1;
+      ctx.translate(Math.round(rand(-a, a) * S) / S, Math.round(rand(-a, a) * S) / S);
     }
 
     this._drawBg(ctx);
@@ -3957,20 +3975,81 @@ class Game {
     }
   }
 
-  _drawBg(ctx) {
+  /* 背景两层都预烘（3.110）。改前的每帧成本（480×854、DPR 2 实测）：
+   *   平铺缩放 6.4ms + 暗角 4.7ms + 上下压暗 1.5ms ≈ 12.7ms，占掉大半个帧预算。
+   * 这两类东西的形状每一帧都一模一样，唯一的变量只有滚动相位：
+   * ① 把 512×512 的底图先缩放到「VIEW.w × 512」并存成设备像素画布，
+   *    每帧只做 1:1 拷贝（2.7 条 → 0.4ms）；
+   * ② 暗角与上下压暗合成一张全屏 RGBA，每帧一次 blit（6.2ms → 0.3ms）。
+   * 缓存键带 (背景名, 画布尺寸, 像素比)：换关、窗口缩放都要重建。 */
+  _bgLayers() {
+    const S = (this.cv.width / VIEW.w) || 1;
     const img = Assets.bg[this.level.bg];
-    const h = 512;
-    const y = this.bgScroll % h;
+    /* 键里带 img 的有无：标题页第一帧就开始画背景，那时图还没加载完，
+     * 不把这一位算进键，后面图到了也会命中"没有底图"的缓存，整局只剩纯色。 */
+    const key = this.level.bg + '|' + (img ? 1 : 0) + '|' + VIEW.w + 'x' + VIEW.h + '|' + S;
+    if (this._bgKey === key && this._bgCache) return this._bgCache;
+
+    const cache = { band: null, shade: null, S };
     if (img) {
+      const band = document.createElement('canvas');
+      band.width = Math.max(1, Math.round(VIEW.w * S));
+      band.height = Math.max(1, Math.round(BG_TILE_H * S));
+      const g = band.getContext('2d');
+      g.imageSmoothingEnabled = true;
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(img, 0, 0, band.width, band.height);
+      cache.band = band;
+    }
+
+    const shade = document.createElement('canvas');
+    shade.width = Math.max(1, Math.round(VIEW.w * S));
+    shade.height = Math.max(1, Math.round(VIEW.h * S));
+    const sg = shade.getContext('2d');
+    sg.setTransform(S, 0, 0, S, 0, 0);
+    // 中心提亮 + 四周压暗：不随滚动，用来压住背景平铺感
+    const vg = sg.createRadialGradient(VIEW.w / 2, VIEW.h * 0.46, 60,
+                                       VIEW.w / 2, VIEW.h * 0.46, VIEW.h * 0.72);
+    vg.addColorStop(0, 'rgba(120,180,230,0.07)');
+    vg.addColorStop(0.55, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    sg.fillStyle = vg;
+    sg.fillRect(0, 0, VIEW.w, VIEW.h);
+    // 顶部/底部氛围压暗
+    const gTop = sg.createLinearGradient(0, 0, 0, 150);
+    gTop.addColorStop(0, 'rgba(3,6,10,0.85)');
+    gTop.addColorStop(1, 'rgba(3,6,10,0)');
+    sg.fillStyle = gTop;
+    sg.fillRect(0, 0, VIEW.w, 150);
+    const gBot = sg.createLinearGradient(0, VIEW.h - 160, 0, VIEW.h);
+    gBot.addColorStop(0, 'rgba(3,6,10,0)');
+    gBot.addColorStop(1, 'rgba(3,6,10,0.9)');
+    sg.fillStyle = gBot;
+    sg.fillRect(0, VIEW.h - 160, VIEW.w, 160);
+    cache.shade = shade;
+
+    this._bgKey = key;
+    this._bgCache = cache;
+    return cache;
+  }
+
+  _drawBg(ctx) {
+    const { band, shade, S } = this._bgLayers();
+    const h = BG_TILE_H;
+    if (band) {
+      const y = this.bgScroll % h;
       for (let i = -1; i * h - y < VIEW.h; i++) {
-        ctx.drawImage(img, 0, i * h - y + h, VIEW.w, h);
+        /* 目标 y 对齐到设备像素：非整数偏移会让整块 960×1024 走双线性采样，
+         * 本来 1:1 的拷贝就退化成缩放，白省了。0.5 设备像素的位移看不出来。 */
+        const dy = Math.round((i * h - y + h) * S) / S;
+        ctx.drawImage(band, 0, 0, band.width, band.height, 0, dy, VIEW.w, h);
       }
     } else {
       ctx.fillStyle = '#06090f';
       ctx.fillRect(0, 0, VIEW.w, VIEW.h);
     }
 
-    // 星点
+    // 星点（夹在底图和压暗之间，压暗才压得住最亮的那几颗）
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (const s of this.stars) {
@@ -3980,27 +4059,7 @@ class Game {
     }
     ctx.restore();
 
-    // 中心提亮 + 四周压暗：不随滚动，用来压住背景平铺感
-    const vg = ctx.createRadialGradient(VIEW.w / 2, VIEW.h * 0.46, 60,
-                                        VIEW.w / 2, VIEW.h * 0.46, VIEW.h * 0.72);
-    vg.addColorStop(0, 'rgba(120,180,230,0.07)');
-    vg.addColorStop(0.55, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, VIEW.w, VIEW.h);
-
-    // 顶部/底部氛围压暗
-    const gTop = ctx.createLinearGradient(0, 0, 0, 150);
-    gTop.addColorStop(0, 'rgba(3,6,10,0.85)');
-    gTop.addColorStop(1, 'rgba(3,6,10,0)');
-    ctx.fillStyle = gTop;
-    ctx.fillRect(0, 0, VIEW.w, 150);
-
-    const gBot = ctx.createLinearGradient(0, VIEW.h - 160, 0, VIEW.h);
-    gBot.addColorStop(0, 'rgba(3,6,10,0)');
-    gBot.addColorStop(1, 'rgba(3,6,10,0.9)');
-    ctx.fillStyle = gBot;
-    ctx.fillRect(0, VIEW.h - 160, VIEW.w, 160);
+    ctx.drawImage(shade, 0, 0, VIEW.w, VIEW.h);
   }
 
   /** 电弧链特效：折线 + 白色内芯，每帧抖动 */
@@ -5126,10 +5185,10 @@ class Game {
     if (this.storyT <= 0 || !this.storyLines) return;
     const cx = VIEW.w / 2;
     const maxW = VIEW.w - 56;
-    /* 淡入 0.3 秒、淡出 0.7 秒。淡出比淡入慢：它经常和爆炸、结算跳字同时出现，
-     * 快淡出会被那些东西盖住，玩家一句话没读完就没了。 */
+    /* 淡入 0.3 秒、淡出 0.9 秒（3.111：原 0.7）。淡出比淡入慢得多：
+     * 它经常和爆炸、结算跳字同时出现，快淡出等于把最后半句从玩家眼里抽走。 */
     const shown = this.storyDur - this.storyT;
-    const a = Math.min(1, shown / 0.3) * Math.min(1, this.storyT / 0.7);
+    const a = Math.min(1, shown / 0.3) * Math.min(1, this.storyT / 0.9);
     if (a <= 0) return;
 
     let y, font, color, lineH;

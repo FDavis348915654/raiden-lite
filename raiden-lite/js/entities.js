@@ -5105,19 +5105,22 @@ class Boss {
     // 震颤偏移：整体平移，让本体 / 炮塔 / 护盾 / 浮游炮作为一体在颤
     const jx = this.jx || 0, jy = this.jy || 0;
     if (jx || jy) {
+      /* 同样要对齐设备像素（3.110）：机身下面是那张预烘的投影贴图，
+       * 非整数平移会让它整张走双线性采样——实测 0.5ms → 3.6ms，
+       * 而 BOSS 每次受击都会颤，等于每挨打一下就掉一帧。 */
+      const tf = ctx.getTransform ? ctx.getTransform() : null;
+      const S = Math.abs((tf && tf.a) || 1);
       ctx.save();
-      ctx.translate(jx, jy);
+      ctx.translate(Math.round(jx * S) / S, Math.round(jy * S) / S);
     }
 
-    // 暗影把 BOSS 从背景里托出来（背景与机体常同色系）
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.85)';
-    ctx.shadowBlur = 34;
-    ctx.shadowOffsetY = 6;
-    /* 无敌期不再把机体画成半透明（3.46）：那读起来像"贴图没加载完"，
-     * 而且与"子弹会弹开"这件事毫无关系。现在由护罩负责解释为什么打不动。 */
-    Assets.draw(ctx, this.sprite, this.x, this.y, 1, 1);
-    ctx.restore();
+    /* 暗影把 BOSS 从背景里托出来（背景与机体常同色系）。
+     * 3.110：原来是每帧给整张 BOSS 贴图开 shadowBlur 34，实测单这一项 4.3ms
+     * （帧预算的 1/4），而且每帧长得一模一样。改成加载时烘一张"带影子"的
+     * 副本，每帧只做一次 1:1 贴图拷贝（0.7ms）。
+     * 无敌期不把机体画成半透明（3.46）：那读起来像"贴图没加载完"，
+     * 也与"子弹会弹开"毫无关系；解释"打不动"的是外圈那层护罩。 */
+    Assets.drawShadow(ctx, this.sprite, this.x, this.y, 1, 1);
 
     this._drawParts(ctx);
     this._drawGimmickFx(ctx);

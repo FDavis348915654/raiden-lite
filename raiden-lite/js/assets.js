@@ -12,6 +12,9 @@ const Assets = {
   /* 染色缓存（3.83）：受击闪红要把整帧贴图染成红色，每帧现染会反复建 canvas。
    * 键是 `帧名|颜色`，图集换了就在 load 里清空。 */
   _tints: {},
+  /* 投影缓存（3.110）：BOSS 底下那层暗影。shadowBlur 每帧重算要 4.3ms，
+   * 而它每帧完全一样——烘成一张带影子的贴图，之后只做贴图拷贝。 */
+  _shadows: {},
 
   load() {
     // 资源版本串：图集坐标（atlas.js）和图片必须同版本。
@@ -27,6 +30,7 @@ const Assets = {
     return Promise.all(jobs).then(() => {
       this.frames = ATLAS;
       this._tints = {};
+      this._shadows = {};
       this._buildBullets();
       this.ready = true;
     });
@@ -192,6 +196,55 @@ const Assets = {
     } else {
       ctx.drawImage(c, cx - w / 2, cy - h / 2, w, h);
     }
+    if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = 1;
+  },
+
+  /* 预烘"带投影"的贴图。参数与原来 Boss.draw 里的 shadow 一致：
+   * 0.85 黑、blur 34、offsetY 6。pad 44 > 34+6，模糊尾巴不会被切掉。
+   *
+   * 必须按**设备像素**烘（乘 ctx 的缩放比），绘制时再做 1:1 拷贝：
+   * 实测在软件光栅下，1:1 贴图 0.11ms，而拿一张 1 倍图放大 2 倍贴上去要
+   * 5.7ms——放大路径要对每个像素做双线性采样 + alpha 混合，慢了 50 倍。 */
+  _shadow(name, S) {
+    const key = name + '|' + S;
+    const hit = this._shadows[key];
+    if (hit) return hit;
+    const f = this.frames[name];
+    if (!f) return null;
+    const pad = 44;
+    const cssW = f[2] + pad * 2, cssH = f[3] + pad * 2;
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(cssW * S));
+    c.height = Math.max(1, Math.round(cssH * S));
+    const g = c.getContext('2d');
+    g.setTransform(S, 0, 0, S, 0, 0);
+    g.shadowColor = 'rgba(0,0,0,0.85)';
+    g.shadowBlur = 34;
+    g.shadowOffsetY = 6;
+    g.drawImage(this.sheet, f[0], f[1], f[2], f[3], pad, pad, f[2], f[3]);
+    c._w = cssW;
+    c._h = cssH;
+    this._shadows[key] = c;
+    return c;
+  },
+
+  /** 提前烘好投影贴图（见 _shadow）。名字不存在时静默返回，不抛。 */
+  prewarmShadow(name, S) {
+    this._shadow(name, S || 1);
+  },
+
+  /** 画带投影的精灵（投影和精灵在这一张里，调用方不要再画一遍精灵） */
+  drawShadow(ctx, name, cx, cy, scale, alpha) {
+    const s = scale === undefined ? 1 : scale;
+    /* getTransform 是 2018 年后的 API；拿不到就按 1 倍处理（图上会略糊，
+     * 但不会抛——这层缓存不值得为它冒一次白屏的风险）。 */
+    const tf = ctx.getTransform ? ctx.getTransform() : null;
+    const S = Math.abs((tf && tf.a) || 1);
+    const c = this._shadow(name, S);
+    if (!c) return;
+    const w = c._w * s, h = c._h * s;
+    if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = alpha;
+    ctx.drawImage(c, 0, 0, c.width, c.height, cx - w / 2, cy - h / 2, w, h);
     if (alpha !== undefined && alpha !== 1) ctx.globalAlpha = 1;
   },
 
